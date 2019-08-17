@@ -1,0 +1,185 @@
+---
+title: "titanic"
+author: "ZackBarry"
+date: "8/17/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load libraries.
+library(dplyr)
+library(readr)
+library(stringr)
+library(DataExplorer)
+library(mice)
+library(parsnip) # API for rpart() and others, install_github("tidymodels/parsnip")
+
+# Read in data.
+train <- read_csv("Data/titanic/train.csv")
+test <- read_csv("Data/titanic/test.csv")
+```
+
+## Explore the data using DataExplorer
+
+First, let's see what type of data we're dealing with:
+```{r}
+plot_intro(train)
+```
+The majority of the columns contain continuous data and 70.5% of the
+rows have at least one missing value. Let's check which columns are
+missing data:
+```{r}
+DataExplorer::plot_missing(train)
+```
+The majority of the `Cabin` observations are missing, so we will drop
+it from consideration for now.  We will impute the missing values for `Embarked` and `Age` below.
+
+Finally, let's get a sense of the distribution of our categorical and
+continuous data.
+```{r}
+DataExplorer::plot_bar(train)
+```
+The response variable, `Survived`, is well balanced, and each of `Sex`
+and `Embarked` have a small set of values.  Since `Name` and `Ticket`
+have so many categories we will look into grouping their values when
+we do feature selection below.
+
+Next, the continuous data:
+```{r}
+plot_histogram(train)
+```
+We see that `Pclass` should be treated as categorical data.
+`SibSp` and `Parch` could be binned into `SmallFamily`, `MediumFamily`, and `LargeFamily`, and it may be helpful to bin `Fare`.
+`Age` and `PassengerId` will likely remain as is - it will be interesting to see if `PassengerId` has any relationship with `Survived`.
+
+## Mutate data
+
+Before imputing the missing values for `Embarked` and `Age`, we will
+look at grouping `Name` and `Ticket`.
+```{r}
+head(train$Name)
+```
+It looks like each name is of the form `Last, Title. First...`. Two options
+present themselves: 1) Extract passenger titles and group accordingly, 
+2) Extract last names and match families together.  We will start by examining
+the titles.
+
+Use `stringr::str_match()` to extract each title, assuming each title is located after a comma and is ended by a period.
+```{r}
+train$Title <- str_match(train$Name, ",\\s?([a-zA-Z\\s]+).")[, 2]
+
+plot_bar(train$Title)
+```
+We will keep `Mr`, `Miss`, `Mrs`, `Master` as is -- the others will be joined to one of the former based on gender; if the title is indicative of a profession, that person will be grouped as `titled`.
+```{r}
+train <- train %>%
+  mutate(Title = tolower(Title)) %>%
+  mutate(Title = ifelse(str_detect(Title, "dr|rev|major|col|capt|jonkheer"), "titled",
+                        ifelse(str_detect(Title, "miss|mlle|ms|lady"), "miss",
+                               ifelse(str_detect(Title, "mrs|mme|countess"), "mrs", 
+                                      ifelse(str_detect(Title, "mr|don|sir|master"), "mr",
+                                                        "unknown")))))
+
+plot_bar(select(train, Title))
+```
+
+Now we can group `Ticket`. The logic behind this grouping is that decreasing the
+variance of `Ticket` will reduce the risk of overfitting the model to the test 
+data.  Of course, the trade of is that the bias will increase so we'll need to
+perform some form of cross-validation to see if the binning is an improvement.
+To support this need we'll create a seperate column `TicketBinned` and compare model
+performance with it included as the ticket variable or `TicketNumber` as the ticket
+variable.  This comparison will be done in the feature selection section.
+
+Some tickets numbersare preceeded by letters, but only
+230 of the observations have this extra information:
+```{r}
+train %>%
+  mutate(TicketType = as.numeric(Ticket)) %>%
+  filter(is.na(TicketType)) %>% 
+  select(Ticket)
+```
+We will extract the numbers and work with them only.
+```{r}
+train$TicketNumber <- str_extract(train$Ticket, "[0-9]+$")
+
+train[is.na(train$TicketNumber),]
+```
+4 passengers had tickets which did not include numbers -- we will fill in their
+ticket value with the average ticket value.
+```{r}
+train <- train %>%
+  mutate(TicketNumber = ifelse(is.na(TicketNumber), mean(train$TicketNumber, na.rm = T), TicketNumber)) %>%
+  mutate(TicketNumber = as.numeric(TicketNumber)) %>%
+  select(-Ticket)
+```
+
+Now, let's determine how to bin `TicketNumber` by looking at a histogram of the
+values:
+```{r}
+train %>%
+  ggplot(aes(x = TicketNumber)) +
+  geom_histogram()
+```
+We clearly have a group of tickets with very high values, but it is
+difficult to see the distrubution of the the lower value
+tickets. Let's exclude the larger ticket values for the next histogram:
+```{r}
+train %>%
+  filter(TicketNumber <= 1e6) %>%
+  ggplot(aes(x = TicketNumber)) +
+  geom_histogram()
+```
+No we see that there is a group of ticket values for each interval
+from $[i\times 10^5, (i+1)\times 10^5)$, $0\leq i\leq 3$.
+```{r}
+train <- mutate(train, TicketBinned = round(TicketNumber / 1e5, 0))
+
+count(train, TicketBinned)
+```
+
+## Handle missing data
+
+Since 77.1% of the `Cabin` observations are missing, we will drop it:
+```{r}
+train <- drop_columns(train, "Cabin")
+```
+
+Embarked is only missing 0.22% of its observations. Let's impute those
+observations by fitting a classification tree using the `parsnip` package.
+`parsnip` is a tidy R package which aims to provide a standard API to different
+model fitting packages.  The flow is to call the model type 
+(e.g. `parsnip::logistic_reg()`), set the algorithm used to fit the model
+(e.g. `parsnip::set_engine("rpart", ...)`) (passing package-specific arguments
+through the elipses), and fit the model (`parsnip::fit(formula = , data = )`).
+The output is a a `parsnip` object (a list `PN`), but you can access the output as if it was
+created by the engine by accessing the `fit` element of the object, `PN$fit`.
+```{r}
+embarked_train <- train[!is.na(train$Embarked),]
+embarked_train$Embarked <- as.factor(embarked_train$Embarked)
+
+parsnip::decision_tree(mode = "classification") %>%
+  set_engine("rpart") %>%
+  fit(Embarked ~ Pclass, data = embarked_train)
+```
+
+
+
+## Feature selection
+
+Treat `Pclass` as a factor, look into binning `Fare`.
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
