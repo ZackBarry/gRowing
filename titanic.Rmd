@@ -11,10 +11,12 @@ knitr::opts_chunk$set(echo = TRUE)
 # Load libraries.
 library(dplyr)
 library(readr)
+library(ggplot2)
 library(stringr)
 library(DataExplorer)
 library(mice)
 library(parsnip) # API for rpart() and others, install_github("tidymodels/parsnip")
+library(parsnip)
 
 # Read in data.
 train <- read_csv("Data/titanic/train.csv")
@@ -27,7 +29,7 @@ First, let's see what type of data we're dealing with:
 ```{r}
 plot_intro(train)
 ```
-The majority of the columns contain continuous data and 70.5% of the
+The majority of the columns contain continuous data and 79.5% of the
 rows have at least one missing value. Let's check which columns are
 missing data:
 ```{r}
@@ -52,7 +54,18 @@ plot_histogram(train)
 ```
 We see that `Pclass` should be treated as categorical data.
 `SibSp` and `Parch` could be binned into `SmallFamily`, `MediumFamily`, and `LargeFamily`, and it may be helpful to bin `Fare`.
-`Age` and `PassengerId` will likely remain as is - it will be interesting to see if `PassengerId` has any relationship with `Survived`.
+`PassengerId` seems unlikely to have any relationship with whether or not that passenger survived. 
+Let's check the class-specific distribution of `PassengerId`:
+```{r}
+ggplot(train, aes(x = PassengerId)) + 
+  geom_histogram() + 
+  facet_wrap(~Survived)
+```
+It looks like we can safely drop `PassengerId`.
+```{r}
+train <- select(train, -PassengerId)
+```
+
 
 ## Mutate data
 
@@ -69,6 +82,7 @@ the titles.
 Use `stringr::str_match()` to extract each title, assuming each title is located after a comma and is ended by a period.
 ```{r}
 train$Title <- str_match(train$Name, ",\\s?([a-zA-Z\\s]+).")[, 2]
+train <- select(train, -Name)
 
 plot_bar(train$Title)
 ```
@@ -103,7 +117,7 @@ train %>%
 ```
 We will extract the numbers and work with them only.
 ```{r}
-train$TicketNumber <- str_extract(train$Ticket, "[0-9]+$")
+train$TicketNumber <- as.numeric(str_extract(train$Ticket, "[0-9]+$"))
 
 train[is.na(train$TicketNumber),]
 ```
@@ -112,7 +126,6 @@ ticket value with the average ticket value.
 ```{r}
 train <- train %>%
   mutate(TicketNumber = ifelse(is.na(TicketNumber), mean(train$TicketNumber, na.rm = T), TicketNumber)) %>%
-  mutate(TicketNumber = as.numeric(TicketNumber)) %>%
   select(-Ticket)
 ```
 
@@ -147,22 +160,47 @@ Since 77.1% of the `Cabin` observations are missing, we will drop it:
 train <- drop_columns(train, "Cabin")
 ```
 
-Embarked is only missing 0.22% of its observations. Let's impute those
-observations by fitting a classification tree using the `parsnip` package.
-`parsnip` is a tidy R package which aims to provide a standard API to different
-model fitting packages.  The flow is to call the model type 
-(e.g. `parsnip::logistic_reg()`), set the algorithm used to fit the model
-(e.g. `parsnip::set_engine("rpart", ...)`) (passing package-specific arguments
-through the elipses), and fit the model (`parsnip::fit(formula = , data = )`).
-The output is a a `parsnip` object (a list `PN`), but you can access the output as if it was
-created by the engine by accessing the `fit` element of the object, `PN$fit`.
+`Embarked` is missing in 2 observations and `Age` is missing
+in 177. We'll simply replace the missing `Embarked` values with the 
+most often observed value; `Age` we will impute with the `MICE` package.
 ```{r}
-embarked_train <- train[!is.na(train$Embarked),]
-embarked_train$Embarked <- as.factor(embarked_train$Embarked)
+train$Embarked[is.na(train$Embarked)] <- count(train, Embarked, sort = T)[1,]$Embarked
+```
 
-parsnip::decision_tree(mode = "classification") %>%
-  set_engine("rpart") %>%
-  fit(Embarked ~ Pclass, data = embarked_train)
+Before using the `MICE` package, we will encode the categorical data in the training set - otherwise those predictors will not be used for filling in the missing data.
+To do this, we will use the `recipes` package.
+This package streamlines the process by which data is prepped for data
+analysis.
+```{r}
+dummy_recipe <- recipe(Survived ~ ., data = train) %>%
+  step_dummy(Embarked, Title) %>%
+  prep(training = train, retain = T)
+
+summary(dummy_recipe)
+```
+The `recipe()` step specifies which variables are predictors and which
+are responses for the provided data set.
+`step_dummy()` converts the indicted character or factor variables into
+binary model terms. 
+Finally, `prep()` generates the metadata to actually do the data preparation.
+Specifying `retain = T` allows us to prepare (apply) the recipe without
+resupplying the data set. This is only helpful if the original data set
+used to train the recipe is the same data to be processed.
+Since we set this parameter, we can call `juice()` to create the
+processed data.
+```{r}
+train_encoded <- juice(dummy_recipe)
+glimpse(train_encoded)
+```
+Instead of the variable `Title` with 4 responses, `mr`, `mrs`, `titled`,
+and `miss`, our data now has three variables `Title_mr`, `Title_mrs`, and
+`Title_titled`. If an observation had a `Title` value of `mr`, `mrs`, or
+`titled`, the respective `Title_x` has a value of `1`. If an observation
+had a `Title` value of `miss`, each `Title_x` is `0`. Similarly for `Embarked`.
+
+```{r}
+train_imputed <- mice(data = train_encoded, maxit = 50)
+summary(train_imputed)
 ```
 
 
@@ -176,10 +214,12 @@ summary(cars)
 
 ## Including Plots
 
-You can also embed plots, for example:
+Let's impute those observations by fitting a classification tree using the `parsnip` package.
+`parsnip` is a tidy R package which aims to provide a standard API to different
+model fitting packages.  The flow is to call the model type 
+(e.g. `parsnip::logistic_reg()`), set the algorithm used to fit the model
+(e.g. `parsnip::set_engine("rpart", ...)`) (passing package-specific arguments
+through the elipses), and fit the model (`parsnip::fit(formula = , data = )`).
+The output is a a `parsnip` object (a list `PN`), but you can access the output as if it was
+created by the engine by accessing the `fit` element of the object, `PN$fit`.
 
-```{r pressure, echo=FALSE}
-plot(pressure)
-```
-
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
