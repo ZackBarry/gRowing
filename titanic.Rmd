@@ -16,7 +16,11 @@ library(stringr)
 library(DataExplorer)
 library(mice)
 library(parsnip) # API for rpart() and others, install_github("tidymodels/parsnip")
-library(parsnip)
+library(recipes)
+library(ranger)
+library(rsample)
+
+complete <- mice::complete
 
 # Read in data.
 train <- read_csv("Data/titanic/train.csv")
@@ -197,22 +201,13 @@ and `miss`, our data now has three variables `Title_mr`, `Title_mrs`, and
 `Title_titled`. If an observation had a `Title` value of `mr`, `mrs`, or
 `titled`, the respective `Title_x` has a value of `1`. If an observation
 had a `Title` value of `miss`, each `Title_x` is `0`. Similarly for `Embarked`.
-
 ```{r}
 train_imputed <- mice(data = train_encoded, maxit = 50)
-summary(train_imputed)
+head(train_imputed$imp$Age)
 ```
-
 
 
 ## Feature selection
-
-Treat `Pclass` as a factor, look into binning `Fare`.
-```{r cars}
-summary(cars)
-```
-
-## Including Plots
 
 Let's impute those observations by fitting a classification tree using the `parsnip` package.
 `parsnip` is a tidy R package which aims to provide a standard API to different
@@ -222,4 +217,38 @@ model fitting packages.  The flow is to call the model type
 through the elipses), and fit the model (`parsnip::fit(formula = , data = )`).
 The output is a a `parsnip` object (a list `PN`), but you can access the output as if it was
 created by the engine by accessing the `fit` element of the object, `PN$fit`.
+
+```{r}
+train_imputed_1 <- mutate(complete(train_imputed, 1), Suvived = as.factor(Survived)) %>%
+  select(-c(Sex, TicketNumber))
+parsnip::decision_tree(mode = "regression")  %>%
+  set_engine("rpart") %>%
+  fit(formula = Survived ~ . - Survived, data = train_imputed_1) -> t
+```
+```{r}
+
+```
+
+## Model fit
+
+```{r}
+i <- 1
+# for (i in 1:5) {
+  imputed_set <- complete(train_imputed, i) %>%
+    mutate(Survived = as.factor(Survived))
+  train_test <- initial_split(imputed_set, prop = 0.8)
+  random_forest <- rand_forest(mode = "classification") %>%
+    set_engine("ranger") %>%
+    fit(Survived ~ . - TicketNumber, data = imputed_set)
+  predictions <- random_forest %>%
+    predict(new_data = complete(test_imputed, 1)) %>%
+    bind_cols(complete(test_imputed, 1) %>% select(PassengerId))
+# }
+```
+
+
+
+## Including Plots
+
+
 
