@@ -207,7 +207,101 @@ head(train_imputed$imp$Age)
 ```
 
 
-## Feature selection
+## Model training
+
+Before training our Random Forest model, we'll combine all of the preprocessing 
+steps above (including `Age` imputation) into a recipe so that we can quickly
+prepare subsets of the training data for cross validation.
+```{r}
+prep_titanic <- function(data) {
+  
+  # Extract information from unique variables.
+  data <- data %>%
+    mutate(
+      Title = str_match(Name, ",\\s?([a-zA-Z\\s]+).")[, 2],
+      Title = tolower(Title), 
+      Title = ifelse(str_detect(Title, "dr|rev|major|col|capt|jonkheer"), "titled",
+                          ifelse(str_detect(Title, "miss|mlle|ms|lady"), "miss",
+                                 ifelse(str_detect(Title, "mrs|mme|countess"), "mrs", 
+                                        ifelse(str_detect(Title, "mr|don|sir|master"), "mr",
+                                                          "unknown")))),
+      TicketNumber = as.numeric(str_extract(Ticket, "[0-9]+$"))
+   )
+  
+  # Apply simple imputations and fill in missing dependent features.
+  data <- data %>%
+    mutate(
+      TicketNumber = ifelse(is.na(TicketNumber), mean(TicketNumber, na.rm = T), TicketNumber),
+      TicketBinned = round(TicketNumber / 1e5, 0),
+      Embarked = ifelse(is.na(Embarked), count(., Embarked, sort = T)[1,]$Embarked, Embarked)
+    )
+  
+  # Keep only a subset of the predictor variables.
+  data <- data %>%
+    select(
+      Survived,
+      Pclass,
+      Sex,
+      Age,
+      SibSp,
+      Parch,
+      Fare,
+      Embarked,
+      Title,
+      TicketBinned
+    )
+  
+  # Create dummy variables for factor columns.
+  #   Note: the training step is only important to do outside of the loop if 
+  #         steps in the recipe have the potential to change based on the data
+  #         set.  An example would be selecting a column to remove based on 
+  #         near-zero variance.  In this case, we are simply creating dummy 
+  #         variables so the recipe can be trained and juiced within this
+  #         preproccessing function while treating all data sets consistently.
+  data <- recipe(Survived ~ ., data = data) %>%
+    step_dummy(Embarked, Title) %>%
+    prep(training = data, retain = T) %>%
+    juice()
+  
+  # Impute 'Age' using MICE.
+  mice(data, maxit = 50, printFlag = FALSE)
+}
+```
+
+Do do cross-validation, we'll use the `rsample` package and its functions
+`vfold_cv`, `analysis` and `assessment`.  `vfold_cv` is used to divide a 
+data set into $v$ "folds" of equal size.  For 10-fold cv, each fold is 
+approximately $1/10$ the size of the original data set.  The relative
+compliment of each fold is used to train the model; an error statistic such
+as RMSE is calculated by applying that model to the hold out fold.
+To access a training set, `analysis()` is used; to access a hold out set, 
+`assessment()` is used.
+
+
+
+```{r}
+vfold_data <- vfold_cv(train, v = 10)
+
+# trees: 10 - 100
+err_rand_forest <- function(cv_data, mtry, trees, min_n) {
+  
+  random_forest <- rand_forest(mode = "classification") %>%
+    set_engine("ranger") %>%
+    fit(Survived ~ . - TicketNumber, data = analysis(cv_data))
+  
+  predictions <- random_forest %>%
+    predict(new_data = assessment(cv_data)) %>%
+    bind_cols(new_data %>% select(Survived)) %>%
+    rename(predicted = .pred_class)
+  
+  error_rate <- mean(predictions$predicted != assessment(cv_data)$Survived)
+  
+}
+
+
+```
+
+
 
 Let's impute those observations by fitting a classification tree using the `parsnip` package.
 `parsnip` is a tidy R package which aims to provide a standard API to different
@@ -218,18 +312,14 @@ through the elipses), and fit the model (`parsnip::fit(formula = , data = )`).
 The output is a a `parsnip` object (a list `PN`), but you can access the output as if it was
 created by the engine by accessing the `fit` element of the object, `PN$fit`.
 
-```{r}
-train_imputed_1 <- mutate(complete(train_imputed, 1), Suvived = as.factor(Survived)) %>%
-  select(-c(Sex, TicketNumber))
-parsnip::decision_tree(mode = "regression")  %>%
-  set_engine("rpart") %>%
-  fit(formula = Survived ~ . - Survived, data = train_imputed_1) -> t
-```
-```{r}
-
-```
 
 ## Model fit
+
+# https://www.r-bloggers.com/how-to-use-recipes-package-from-tidymodels-for-one-hot-encoding-%F0%9F%9B%A0/ 
+# https://towardsdatascience.com/modelling-with-tidymodels-and-parsnip-bae2c01c131c (parsnip walkthrough)
+# https://stats.stackexchange.com/questions/228553/perform-random-forest-after-multiple-imputation-with-mice
+# https://www.brodrigues.co/blog/2018-11-25-tidy_cv/ (hyperparameter tuning)
+
 
 ```{r}
 i <- 1
