@@ -239,6 +239,7 @@ prep_titanic <- function(data) {
   # Keep only a subset of the predictor variables.
   data <- data %>%
     select(
+      PassengerId,
       Survived,
       Pclass,
       Sex,
@@ -280,25 +281,108 @@ To access a training set, `analysis()` is used; to access a hold out set,
 
 
 ```{r}
-vfold_data <- vfold_cv(train, v = 10)
+mice_rf <- function(train, mtry, trees, min_n) {
+  # train: A mice object containing train$m imputed data sets.
+  
+  models <- list()
+  
+  for (i in 1:train$m) {
+    train_imputed_i <- complete(train_imputed, i) %>%
+      mutate(Survived = as.factor(Survived))
+    
+    random_forest_i <- rand_forest(mode = "classification", mtry = mtry, trees = trees, min_n = min_n) %>%
+      set_engine("ranger") %>%
+      fit(Survived ~ . - TicketNumber - PassengerId, data = train_imputed_i)
+    
+    models[[i]] <- random_forest_i
+  }
+  
+  return(models)
+}
+
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+ranked_choice <- function(test, models) {
+  # test: A single data set, already preprocessed with a column "id".
+  # models: A list of models which can be used via predict().
+  
+  # returns:  id | predicted
+  
+  predictions <- NULL
+  
+  for (i in 1:length(models)) {
+    
+    predictions_i <- models[[i]] %>%
+      predict(new_data = test) %>%
+      bind_cols(test %>% select(PassengerId)) %>%
+      rename(predicted = .pred_class)
+    
+    if (is.null(predictions)) {
+      predictions <- predictions_i
+    } else {
+      predictions <- rbind(predictions, predictions_i)
+    }
+    
+    print(tail(predictions))
+    
+  }
+  
+  # predict() returns a factor column instead of a numeric one; convert back
+  # before calling Mode()
+  predictions %>%
+    mutate(predicted = as.numeric(levels(predicted))[predicted]) %>%
+    group_by(PassengerId) %>%
+    summarise(predicted = Mode(predicted))
+}
 
 # trees: 10 - 100
 err_rand_forest <- function(cv_data, mtry, trees, min_n) {
+  # cv_data: An object from rsample from which the training set can be retrieved
+  #          via analysis(cv_data) and the test set via assessment(cv_data).
   
-  random_forest <- rand_forest(mode = "classification") %>%
-    set_engine("ranger") %>%
-    fit(Survived ~ . - TicketNumber, data = analysis(cv_data))
+  train <- analysis(cv_data)
+  test <- assessment(cv_data)
   
-  predictions <- random_forest %>%
-    predict(new_data = assessment(cv_data)) %>%
-    bind_cols(new_data %>% select(Survived)) %>%
-    rename(predicted = .pred_class)
+  train <- prep_titanic(train)
+  test <- prep_titanic(test)
   
-  error_rate <- mean(predictions$predicted != assessment(cv_data)$Survived)
+  models <- mice_rf(train, mtry, trees, min_n)
   
+  result <- NULL
+  
+  for (i in 1:test$m) {
+    test_i <- complete(test, i) 
+    result_i <- ranked_choice(test_i, models)
+    
+    if (is.null(result)) {
+      result <- result_i
+    } else {
+      result <- rbind(result, result_i)
+    }
+  }
+  
+  ranked_choice_result <- result %>%
+    group_by(PassengerId) %>%
+    summarise(predicted = Mode(predicted)) 
+  
+  true_result <- complete(test, 1)
+  
+  error_rate <- mean(ranked_choice_result$predicted != true_result$Survived)
 }
 
 
+```
+
+```{r}
+vfold_data <- vfold_cv(train, v = 10)
+
+small_train <- vfold_data$splits[[1]] %>% analysis()
+small_test <- vfold_data$splits[[1]] %>% assessment()
+
+cv_data <- vfold_data$splits[[1]]
 ```
 
 
