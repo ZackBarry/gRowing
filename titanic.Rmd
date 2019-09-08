@@ -157,6 +157,22 @@ train <- mutate(train, TicketBinned = round(TicketNumber / 1e5, 0))
 count(train, TicketBinned)
 ```
 
+Lastly, we will use the `SibSp` and `Parch` columns to infer the size of a 
+passenger's family.  The logic here is that an individual traveling alone may
+have a higher survival chance since they would not be responsible for any 
+others.  Large families may have a worse survival chance.  Recall that
+`SipSp` is the number of siblings/spouses aboard the Titanic and `Parch` is
+the number of parents/children aboard.
+
+```{r}
+train <- train %>%
+  mutate(
+    Singleton = ifelse(SibSp == 0 & Parch == 0, 1, 0),
+    Small_Family = ifelse(0 < SibSp + Parch & SibSp + Parch <= 3, 1, 0),
+    Large_Family = ifelse(3 < SibSp + Parch, 1, 0)
+  )
+```
+
 ## Handle missing data
 
 Since 77.1% of the `Cabin` observations are missing, we will drop it:
@@ -234,6 +250,11 @@ prep_titanic <- function(data) {
       TicketNumber = ifelse(is.na(TicketNumber), mean(TicketNumber, na.rm = T), TicketNumber),
       TicketBinned = round(TicketNumber / 1e5, 0),
       Embarked = ifelse(is.na(Embarked), count(., Embarked, sort = T)[1,]$Embarked, Embarked)
+    ) %>%
+    mutate(
+      Singleton = ifelse(SibSp == 0 & Parch == 0, 1, 0),
+      Small_Family = ifelse(0 < SibSp + Parch & SibSp + Parch <= 3, 1, 0),
+      Large_Family = ifelse(3 < SibSp + Parch, 1, 0)
     )
   
   # Keep only a subset of the predictor variables.
@@ -249,9 +270,14 @@ prep_titanic <- function(data) {
       Fare,
       Embarked,
       Title,
-      TicketBinned
+      TicketBinned,
+      Singleton,
+      Small_Family,
+      Large_Family
     )
-  
+}
+
+impute_titanic <- function(data, trained_recipe) {
   # Create dummy variables for factor columns.
   #   Note: the training step is only important to do outside of the loop if 
   #         steps in the recipe have the potential to change based on the data
@@ -259,10 +285,7 @@ prep_titanic <- function(data) {
   #         near-zero variance.  In this case, we are simply creating dummy 
   #         variables so the recipe can be trained and juiced within this
   #         preproccessing function while treating all data sets consistently.
-  data <- recipe(Survived ~ ., data = data) %>%
-    step_dummy(Embarked, Title) %>%
-    prep(training = data, retain = T) %>%
-    juice()
+  data <- bake(trained_recipe, data)
   
   # Impute 'Age' using MICE.
   mice(data, maxit = 50, printFlag = FALSE)
@@ -281,12 +304,12 @@ To access a training set, `analysis()` is used; to access a hold out set,
 
 
 ```{r}
-mice_rf <- function(train, mtry, trees, min_n) {
-  # train: A mice object containing train$m imputed data sets.
+mice_rf <- function(train_imputed, mtry, trees, min_n) {
+  # train_imputed: A mice object containing train_imputed$m imputed data sets.
   
   models <- list()
   
-  for (i in 1:train$m) {
+  for (i in 1:train_imputed$m) {
     train_imputed_i <- complete(train_imputed, i) %>%
       mutate(Survived = as.factor(Survived))
     
@@ -326,8 +349,6 @@ ranked_choice <- function(test, models) {
       predictions <- rbind(predictions, predictions_i)
     }
     
-    print(tail(predictions))
-    
   }
   
   # predict() returns a factor column instead of a numeric one; convert back
@@ -339,22 +360,14 @@ ranked_choice <- function(test, models) {
 }
 
 # trees: 10 - 100
-err_rand_forest <- function(cv_data, mtry, trees, min_n) {
+err_rand_forest <- function(test_imputed, models) {
   # cv_data: An object from rsample from which the training set can be retrieved
   #          via analysis(cv_data) and the test set via assessment(cv_data).
   
-  train <- analysis(cv_data)
-  test <- assessment(cv_data)
-  
-  train <- prep_titanic(train)
-  test <- prep_titanic(test)
-  
-  models <- mice_rf(train, mtry, trees, min_n)
-  
   result <- NULL
   
-  for (i in 1:test$m) {
-    test_i <- complete(test, i) 
+  for (i in 1:test_imputed$m) {
+    test_i <- complete(test_imputed, i) 
     result_i <- ranked_choice(test_i, models)
     
     if (is.null(result)) {
@@ -370,19 +383,90 @@ err_rand_forest <- function(cv_data, mtry, trees, min_n) {
   
   true_result <- complete(test, 1)
   
-  error_rate <- mean(ranked_choice_result$predicted != true_result$Survived)
+  mean(ranked_choice_result$predicted != true_result$Survived)
 }
 
-
+fit_predict_error <- function(train_imputed, test_imputed, mtry, trees, min_n) {
+  
+  models <- mice_rf(train_imputed, mtry, trees, min_n)
+  
+  error <- err_rand_forest(test_imputed, models)
+  
+  print(paste(error, mtry, trees, min_n))
+  
+  return(data.frame(error = error, mtry = mtry, trees = trees, min_n = min_n))
+}
 ```
 
 ```{r}
+train_prepped <- prep_titanic(train)
+
+trained_recipe <- recipe(Survived ~ ., data = train_prepped) %>%
+    step_dummy(Embarked, Title) %>%
+    prep(training = train_prepped)
+
+test_recipe <- train_prepped %>%
+  mutate(Pclass = as.factor(Pclass)) %>%
+  recipe(Survived ~ ., data = .) %>%
+  step_dummy(Embarked, Title, Sex, Pclass) %>%
+  prep(training = mutate(train_prepped, Pclass = as.factor(Pclass)))
+
 vfold_data <- vfold_cv(train, v = 10)
 
-small_train <- vfold_data$splits[[1]] %>% analysis()
-small_test <- vfold_data$splits[[1]] %>% assessment()
+params <- tidyr::crossing(
+  mtry = seq(1, 8),
+  trees = seq(50, 500, 50),
+  min_n = seq(5, 50, by = 5)
+)
 
-cv_data <- vfold_data$splits[[1]]
+params_test <- tidyr::crossing(
+  mtry = seq(4, 5),
+  trees = seq(150, 200, 50),
+  min_n = seq(10, 20, by = 5)
+)
+
+results <- NULL
+ 
+tictoc::tic("starting")
+
+for (i in 1:10) {
+  train <- vfold_data$splits[[i]] %>%
+    analysis() %>%
+    prep_titanic() %>%
+    impute_titanic(trained_recipe)
+  
+  test <- vfold_data$splits[[i]] %>%
+    assessment() %>%
+    prep_titanic() %>%
+    impute_titanic(trained_recipe)
+  
+  results_i <- mapply(
+    fit_predict_error, 
+    mtry = params$mtry, 
+    trees = params$trees, 
+    min_n = params$min_n, 
+    MoreArgs = list(
+      train = train, 
+      test = test)
+    ) %>%
+    t() %>%
+    as.data.frame() %>%
+    mutate(fold = i)
+  
+  results_i_df <- data.frame(matrix(unlist(results_i), ncol = length(results_i), byrow = F))
+  
+  names(results_i_df) <- names(results_i)
+  
+  if (is.null(results)) {
+    results <- results_i_df
+  } else {
+    results <- rbind(results, results_i_df)
+  }
+}
+
+tictoc::toc()
+
+results %>% group_by(mtry, trees, min_n) %>% summarise(min = min(error), median = median(error), mean = mean(error), max = max(error)) %>% arrange(mean)
 ```
 
 
