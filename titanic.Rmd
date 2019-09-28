@@ -2,7 +2,9 @@
 title: "titanic"
 author: "ZackBarry"
 date: "8/17/2019"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 
 ```{r setup, include=FALSE}
@@ -39,8 +41,9 @@ missing data:
 ```{r}
 DataExplorer::plot_missing(train)
 ```
-The majority of the `Cabin` observations are missing, so we will drop
-it from consideration for now.  We will impute the missing values for `Embarked` and `Age` below.
+A large majority of the `Cabin` observations are missing, so we will not attempt to
+impute the missing values. Since `Embarked` and `Age` are missing in far fewer
+instances, we will impute them using the `MICE` package below.
 
 Finally, let's get a sense of the distribution of our categorical and
 continuous data.
@@ -125,16 +128,16 @@ train$TicketNumber <- as.numeric(str_extract(train$Ticket, "[0-9]+$"))
 
 train[is.na(train$TicketNumber),]
 ```
-4 passengers had tickets which did not include numbers -- we will fill in their
-ticket value with the average ticket value.
+4 passengers had tickets which did not include numbers -- we will impute their
+ticket value by calculating the average ticket value.
 ```{r}
 train <- train %>%
   mutate(TicketNumber = ifelse(is.na(TicketNumber), mean(train$TicketNumber, na.rm = T), TicketNumber)) %>%
   select(-Ticket)
 ```
 
-Now, let's determine how to bin `TicketNumber` by looking at a histogram of the
-values:
+Now, let's determine whether or not to bin `TicketNumber` by looking at a histogram 
+of the values:
 ```{r}
 train %>%
   ggplot(aes(x = TicketNumber)) +
@@ -150,35 +153,50 @@ train %>%
   geom_histogram()
 ```
 No we see that there is a group of ticket values for each interval
-from $[i\times 10^5, (i+1)\times 10^5)$, $0\leq i\leq 3$.
-```{r}
-train <- mutate(train, TicketBinned = round(TicketNumber / 1e5, 0))
-
-count(train, TicketBinned)
-```
+from $[i\times 10^5, (i+1)\times 10^5)$, $0\leq i\leq 3$, but it is not clear that
+binning the ticket numbers would improve the feature's importance in the model.
+We will leave them be for now.
 
 Lastly, we will use the `SibSp` and `Parch` columns to infer the size of a 
 passenger's family.  The logic here is that an individual traveling alone may
 have a higher survival chance since they would not be responsible for any 
 others.  Large families may have a worse survival chance.  Recall that
 `SipSp` is the number of siblings/spouses aboard the Titanic and `Parch` is
-the number of parents/children aboard.
+the number of parents/children aboard. We will 
 
 ```{r}
 train <- train %>%
   mutate(
-    Singleton = ifelse(SibSp == 0 & Parch == 0, 1, 0),
-    Small_Family = ifelse(0 < SibSp + Parch & SibSp + Parch <= 3, 1, 0),
-    Large_Family = ifelse(3 < SibSp + Parch, 1, 0)
+    Family_Size = ifelse(SibSp + Parch == 0, "Singleton",
+                         ifelse(SibSp + Parch <= 3, "Small_Family",
+                                "Large_Family"))
   )
 ```
 
 ## Handle missing data
 
-Since 77.1% of the `Cabin` observations are missing, we will drop it:
+Since 77.1% of the `Cabin` observations are missing, we will not impute the
+missing values but will mark them as such. Each `Cabin` value contains a concatenation of
+letter and number combinations of the form "AXX BYY".  We will drop the numbers
+and replace the `Cabin` value with first letter that appears.
 ```{r}
-train <- drop_columns(train, "Cabin")
+train <- train %>%
+  mutate(Letters = str_extract_all(Cabin, "^[A-Z]")) %>% # "^" matches the start of the string
+  rowwise() %>%
+  mutate(Cabin_Letter = Letters[[1]]) %>%
+  ungroup() %>%  # rowwise() groups by row
+  mutate(Cabin_Letter = ifelse(is.na(Cabin_Letter), "Unknown", Cabin_Letter)) %>%
+  select(-c(Cabin, Letters))
 ```
+Let's see what the counts of each letter are for those who survived and those that
+didn't:
+```{r}
+train %>%
+  ggplot(aes(x = Cabin_Letter, fill = as.factor(Survived))) +
+  geom_bar(stat = "count", position = position_dodge())
+```
+An unknown cabin record is the most common for both groups, but it 
+appears as if those who didn't survive are most likely to have an unknown cabin.
 
 `Embarked` is missing in 2 observations and `Age` is missing
 in 177. We'll simply replace the missing `Embarked` values with the 
@@ -193,7 +211,7 @@ This package streamlines the process by which data is prepped for data
 analysis.
 ```{r}
 dummy_recipe <- recipe(Survived ~ ., data = train) %>%
-  step_dummy(Embarked, Title) %>%
+  step_dummy(Embarked, Title, Cabin_Letter, Family_Size) %>%
   prep(training = train, retain = T)
 
 summary(dummy_recipe)
@@ -216,9 +234,10 @@ Instead of the variable `Title` with 4 responses, `mr`, `mrs`, `titled`,
 and `miss`, our data now has three variables `Title_mr`, `Title_mrs`, and
 `Title_titled`. If an observation had a `Title` value of `mr`, `mrs`, or
 `titled`, the respective `Title_x` has a value of `1`. If an observation
-had a `Title` value of `miss`, each `Title_x` is `0`. Similarly for `Embarked`.
+had a `Title` value of `miss`, each `Title_x` is `0`. Similarly for `Embarked`,
+`Cabin`, and `Family_Size`.
 ```{r}
-train_imputed <- mice(data = train_encoded, maxit = 50)
+train_imputed <- mice(data = train_encoded, maxit = 50, printFlag = FALSE)
 head(train_imputed$imp$Age)
 ```
 
@@ -242,7 +261,14 @@ prep_titanic <- function(data) {
                                         ifelse(str_detect(Title, "mr|don|sir|master"), "mr",
                                                           "unknown")))),
       TicketNumber = as.numeric(str_extract(Ticket, "[0-9]+$"))
-   )
+   ) %>%
+   mutate(Letters = str_extract_all(Cabin, "^[A-Z]")) %>% 
+   rowwise() %>%
+   mutate(Cabin_Letter = Letters[[1]]) %>%
+   ungroup() %>%
+   mutate(Cabin_Letter = ifelse(is.na(Cabin_Letter), "Unknown", Cabin_Letter)) %>%
+   select(-c(Cabin, Letters))
+    
   
   # Apply simple imputations and fill in missing dependent features.
   data <- data %>%
@@ -251,14 +277,12 @@ prep_titanic <- function(data) {
       TicketBinned = round(TicketNumber / 1e5, 0),
       Embarked = ifelse(is.na(Embarked), count(., Embarked, sort = T)[1,]$Embarked, Embarked)
     ) %>%
-    mutate(
-      Singleton = ifelse(SibSp == 0 & Parch == 0, 1, 0),
-      Small_Family = ifelse(0 < SibSp + Parch & SibSp + Parch <= 3, 1, 0),
-      Large_Family = ifelse(3 < SibSp + Parch, 1, 0)
-    )
+    mutate(Family_Size = ifelse(SibSp + Parch == 0, "Singleton",
+                                ifelse(SibSp + Parch <= 3, "Small_Family",
+                                       "Large_Family"))) 
   
   # Keep only a subset of the predictor variables.
-  data <- data %>%
+  data %>%
     select(
       PassengerId,
       Survived,
@@ -270,10 +294,9 @@ prep_titanic <- function(data) {
       Fare,
       Embarked,
       Title,
-      TicketBinned,
-      Singleton,
-      Small_Family,
-      Large_Family
+      Cabin_Letter,
+      TicketNumber,
+      Family_Size
     )
 }
 
@@ -301,7 +324,7 @@ as RMSE is calculated by applying that model to the hold out fold.
 To access a training set, `analysis()` is used; to access a hold out set, 
 `assessment()` is used.
 
-
+Now the order of steps gets a bit complicated here.  We're 
 
 ```{r}
 mice_rf <- function(train_imputed, mtry, trees, min_n) {
@@ -315,7 +338,7 @@ mice_rf <- function(train_imputed, mtry, trees, min_n) {
     
     random_forest_i <- rand_forest(mode = "classification", mtry = mtry, trees = trees, min_n = min_n) %>%
       set_engine("ranger") %>%
-      fit(Survived ~ . - TicketNumber - PassengerId, data = train_imputed_i)
+      fit(Survived ~ . - PassengerId, data = train_imputed_i)
     
     models[[i]] <- random_forest_i
   }
@@ -399,74 +422,76 @@ fit_predict_error <- function(train_imputed, test_imputed, mtry, trees, min_n) {
 ```
 
 ```{r}
-train_prepped <- prep_titanic(train)
-
-trained_recipe <- recipe(Survived ~ ., data = train_prepped) %>%
-    step_dummy(Embarked, Title) %>%
-    prep(training = train_prepped)
-
-test_recipe <- train_prepped %>%
-  mutate(Pclass = as.factor(Pclass)) %>%
-  recipe(Survived ~ ., data = .) %>%
-  step_dummy(Embarked, Title, Sex, Pclass) %>%
-  prep(training = mutate(train_prepped, Pclass = as.factor(Pclass)))
-
-vfold_data <- vfold_cv(train, v = 10)
-
-params <- tidyr::crossing(
-  mtry = seq(1, 8),
-  trees = seq(50, 500, 50),
-  min_n = seq(5, 50, by = 5)
-)
-
-params_test <- tidyr::crossing(
-  mtry = seq(4, 5),
-  trees = seq(150, 200, 50),
-  min_n = seq(10, 20, by = 5)
-)
-
-results <- NULL
- 
-tictoc::tic("starting")
-
-for (i in 1:10) {
-  train <- vfold_data$splits[[i]] %>%
-    analysis() %>%
-    prep_titanic() %>%
-    impute_titanic(trained_recipe)
-  
-  test <- vfold_data$splits[[i]] %>%
-    assessment() %>%
-    prep_titanic() %>%
-    impute_titanic(trained_recipe)
-  
-  results_i <- mapply(
-    fit_predict_error, 
-    mtry = params$mtry, 
-    trees = params$trees, 
-    min_n = params$min_n, 
-    MoreArgs = list(
-      train = train, 
-      test = test)
-    ) %>%
-    t() %>%
-    as.data.frame() %>%
-    mutate(fold = i)
-  
-  results_i_df <- data.frame(matrix(unlist(results_i), ncol = length(results_i), byrow = F))
-  
-  names(results_i_df) <- names(results_i)
-  
-  if (is.null(results)) {
-    results <- results_i_df
-  } else {
-    results <- rbind(results, results_i_df)
-  }
-}
-
-tictoc::toc()
-
-results %>% group_by(mtry, trees, min_n) %>% summarise(min = min(error), median = median(error), mean = mean(error), max = max(error)) %>% arrange(mean)
+# train <- read_csv("Data/titanic/train.csv")
+# 
+# train_prepped <- prep_titanic(train)
+# 
+# trained_recipe <- recipe(Survived ~ ., data = train_prepped) %>%
+#     step_dummy(Embarked, Title, Cabin_Letter, Family_Size) %>%
+#     prep(training = train_prepped)
+# 
+# test_recipe <- train_prepped %>%
+#   mutate(Pclass = as.factor(Pclass)) %>%
+#   recipe(Survived ~ ., data = .) %>%
+#   step_dummy(Embarked, Title, Sex, Pclass) %>%
+#   prep(training = mutate(train_prepped, Pclass = as.factor(Pclass)))
+# 
+# vfold_data <- vfold_cv(train, v = 10)
+# 
+# params <- tidyr::crossing(
+#   mtry = seq(1, 8),
+#   trees = seq(50, 500, 50),
+#   min_n = seq(5, 50, by = 5)
+# )
+# 
+# params_test <- tidyr::crossing(
+#   mtry = seq(4, 5),
+#   trees = seq(150, 200, 50),
+#   min_n = seq(10, 20, by = 5)
+# )
+# 
+# results <- NULL
+#  
+# tictoc::tic("starting")
+# 
+# for (i in 1:10) {
+#   train <- vfold_data$splits[[i]] %>%
+#     analysis() %>%
+#     prep_titanic() %>%
+#     impute_titanic(trained_recipe)
+#   
+#   test <- vfold_data$splits[[i]] %>%
+#     assessment() %>%
+#     prep_titanic() %>%
+#     impute_titanic(trained_recipe)
+#   
+#   results_i <- mapply(
+#     fit_predict_error, 
+#     mtry = params_test$mtry, 
+#     trees = params_test$trees, 
+#     min_n = params_test$min_n, 
+#     MoreArgs = list(
+#       train = train, 
+#       test = test)
+#     ) %>%
+#     t() %>%
+#     as.data.frame() %>%
+#     mutate(fold = i)
+#   
+#   results_i_df <- data.frame(matrix(unlist(results_i), ncol = length(results_i), byrow = F))
+#   
+#   names(results_i_df) <- names(results_i)
+#   
+#   if (is.null(results)) {
+#     results <- results_i_df
+#   } else {
+#     results <- rbind(results, results_i_df)
+#   }
+# }
+# 
+# tictoc::toc()
+# 
+# results %>% group_by(mtry, trees, min_n) %>% summarise(min = min(error), median = median(error), mean = mean(error), max = max(error)) %>% arrange(mean)
 ```
 
 
@@ -490,18 +515,18 @@ created by the engine by accessing the `fit` element of the object, `PN$fit`.
 
 
 ```{r}
-i <- 1
-# for (i in 1:5) {
-  imputed_set <- complete(train_imputed, i) %>%
-    mutate(Survived = as.factor(Survived))
-  train_test <- initial_split(imputed_set, prop = 0.8)
-  random_forest <- rand_forest(mode = "classification") %>%
-    set_engine("ranger") %>%
-    fit(Survived ~ . - TicketNumber, data = imputed_set)
-  predictions <- random_forest %>%
-    predict(new_data = complete(test_imputed, 1)) %>%
-    bind_cols(complete(test_imputed, 1) %>% select(PassengerId))
-# }
+# i <- 1
+# # for (i in 1:5) {
+#   imputed_set <- complete(train_imputed, i) %>%
+#     mutate(Survived = as.factor(Survived))
+#   train_test <- initial_split(imputed_set, prop = 0.8)
+#   random_forest <- rand_forest(mode = "classification") %>%
+#     set_engine("ranger") %>%
+#     fit(Survived ~ . - TicketNumber, data = imputed_set)
+#   predictions <- random_forest %>%
+#     predict(new_data = complete(test_imputed, 1)) %>%
+#     bind_cols(complete(test_imputed, 1) %>% select(PassengerId))
+# # }
 ```
 
 
