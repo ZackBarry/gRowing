@@ -1,33 +1,57 @@
-#
-# This is the user-interface definition of a Shiny web application. You can
-# run the application by clicking 'Run App' above.
-#
-# Find out more about building applications with Shiny here:
-#
-#    http://shiny.rstudio.com/
-#
+## ui.R ##
+library(shinydashboard)
 
-library(shiny)
+header <- dashboardHeader(
+    title = "Explore Titanic Features"
+)
 
-# Define UI for application that draws a histogram
-shinyUI(fluidPage(
 
-    # Application title
-    titlePanel("Old Faithful Geyser Data"),
 
-    # Sidebar with a slider input for number of bins
-    sidebarLayout(
-        sidebarPanel(
-            sliderInput("bins",
-                        "Number of bins:",
-                        min = 1,
-                        max = 50,
-                        value = 30)
-        ),
+sidebar <- dashboardSidebar()
 
-        # Show a plot of the generated distribution
-        mainPanel(
-            plotOutput("distPlot")
+
+
+body <- dashboardBody(
+    
+    fluidRow(
+        tabBox(title = NULL, width = 12, 
+               tabPanel(
+                   title = "About this Application",
+                   textOutput("about_app")
+               ),
+               tabPanel(
+                   title = "About Me",
+                   textOutput("about_me")
+               )
+        )
+    ),
+    
+    fluidRow(
+        tabBox(title = "Available Features", width = 12,
+               tabPanel(
+                   title = "Plot Feature Distributions",
+                   fluidRow(
+                       column(width = 3,
+                           radioButtons("plot_by_outcome", label = NULL,
+                                        choices = c("Yes" = "yes", "No" = "no")
+                           ),
+                           radioButtons("plot_feature_type", label = NULL,
+                                        choices = c("Continuous" = "continuous", "Categorical" = "categorical")
+                           ),
+                           uiOutput("plot_feature_options_ui")
+                       ),
+                       column(width = 9,
+                              plotlyOutput("univariate_plot")
+                       )
+                   )
+               )
         )
     )
-))
+    
+)
+
+dashboardPage(
+    header,
+    sidebar,
+    body
+)
