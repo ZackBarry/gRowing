@@ -1,0 +1,148 @@
+---
+title: "exploratory_analysis"
+author: "ZackBarry"
+date: "1/5/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(DataExplorer)
+
+dataset <- read_csv("Data/AB_NYC_2019.csv")
+```
+
+## Abstract
+
+
+
+## Data source
+
+This data set has nearly 50,000 observations of 16 different variables, 6 of 
+which are discrete and 10 of which are continuous.
+
+## Acquiring/Loading Data
+
+```{r}
+dataset <- read_csv("Data/AB_NYC_2019.csv")
+head(datas)
+```
+
+```{r}
+# print size of data set
+dim(dataset)
+```
+
+```{r}
+# high-level overview of data types and missing data
+plot_intro(dataset)
+```
+
+A high-level overview of the types of variables / amount of missing data shows 
+that we have 10 continuous and 6 discrete variables.  Most rows have no missing
+values, and the total number of missing observations is quite low.  Since
+there are 50,000 observations to draw from, we should be able to generate some
+great insights!
+
+## Data Wrangling
+
+
+
+```{r}
+# check which data is missing
+plot_missing(dataset)
+```
+
+```{r}
+# further investigate missing data
+dataset %>%
+  filter(is.na(reviews_per_month) | is.na(last_review)) %>%
+  count(number_of_reviews)
+```
+
+Missing observations are mostly limited to `reviews_per_month` and `last_review`.
+Upon further investigation, these missing observations occur when `number_of_reviews`
+is equal to 0.  This makes sense because if a property has never received any
+reviews there is no concept of "most recent review" nor can a rate of reviews be
+calculated.  However, it makes sense to set `reviews_per_month` to 0 when it is
+missing.  For `last_review`, we'll replace it with a new variable 
+`days_since_review`.  Each non-missing observation is formatted YYYY-MM-DD 
+so this will be easy to do.  Furthermore we can replace the missing values with
+-1 so that the new variable is prepped for modeling.
+
+```{r}
+# handle missing `reviews_per_month`
+dataset <- dataset %>%
+  mutate(reviews_per_month = replace_na(reviews_per_month, 0))
+```
+
+```{r}
+# handle missing `last_review` by creating `days_since_review` with -1 standing
+# in for missing values
+dataset <- dataset %>%
+  mutate(
+    last_review = as.Date(last_review, "%Y-%m-%d"),
+    latest_review_day = max(last_review, na.rm = TRUE)
+  ) %>%
+  mutate(days_since_review = as.numeric(difftime(latest_review_day, last_review, units = "days")) + 1) %>%
+  mutate(days_since_review = replace_na(days_since_review, -1)) %>%
+  select(-c(last_review, latest_review_day))
+```
+
+The other missing observations are in the `host_name` and `name` variables.  
+Since there is already a `host_id` field, these are not needed for identifying
+distinct hosts.  If we were to use these variables for modeling purposes, we
+could replace their missing values with `host_id`.  However, using `name` opens
+up privacy and discrimination concerns that we should avoid.
+```{r}
+# drop host_name and name as protected information
+dataset <- select(dataset, -c(name, host_name))
+```
+
+## Exploring and visualizating data.
+
+The bar plots below give further insight into our discrete (categorical)
+variables.  Our `neighbourhood_group` observations are limited to 5 neighborhood 
+groups, with Manhattan and Brooklyn comprising the majority.  Room type is mostly 
+evenly split between "entire home/apt" and "private room", with "shared room" 
+rarely appearing.  Unsurprisingly, `days_since_review` has too many distinct 
+categories to plot - it should probably be treated as a continuous variable.
+Finally, there are 221 distinct neighborhoods within our neighborhood groups.
+```{r}
+DataExplorer::plot_bar(dataset)
+```
+
+```{r}
+# neighborhood-specific room_type occurences
+dataset %>%
+  count(neighbourhood_group, room_type) %>%
+  arrange(room_type, desc(n))
+```
+
+```{r}
+# count of distinct neighbourhoods per group
+dataset %>%
+  distinct(neighbourhood_group, neighbourhood) %>%
+  count(neighbourhood_group)
+```
+
+
+Let's further investigate our continuous variables via histograms:
+```{r}
+plot_histogram(dataset)
+```
+
+
+** are smaller host_id observations correlated with higher average reviews?
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
