@@ -26,7 +26,7 @@ which are discrete and 10 of which are continuous.
 
 ```{r}
 dataset <- read_csv("Data/AB_NYC_2019.csv")
-head(datas)
+head(dataset)
 ```
 
 ```{r}
@@ -46,8 +46,6 @@ there are 50,000 observations to draw from, we should be able to generate some
 great insights!
 
 ## Data Wrangling
-
-
 
 ```{r}
 # check which data is missing
@@ -133,16 +131,60 @@ Let's further investigate our continuous variables via histograms:
 plot_histogram(dataset)
 ```
 
+We see that `id` is fairly evenly distributed, while most other metrics are
+right-skewed.  `latidue` and `longitude` indicate that the properties are
+distributed across an oval with the center having a higher concentration of
+properties.  `availability_365` is 0 in ~17,500 cases (~37% of observations).
+As shown in the violin plot below, Brooklyn and Manhattan have the largest 
+number of 0 availability properties and are skewed heavily towards having
+less nights available. Bronx and Staten Island are more evenly distributed. We 
+might infer that there are more home/apartment owners in Brooklyn and Manhattan
+who are renting out their property for a small portion of the year.
 
-** are smaller host_id observations correlated with higher average reviews?
-
-
-## Including Plots
-
-You can also embed plots, for example:
-
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+dataset %>%
+  filter(availability_365 == 0) %>%
+  nrow()
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r}
+dataset %>%
+  ggplot(aes(x = neighbourhood_group, y = availability_365)) +
+  geom_violin()
+```
+
+Is there a relationship between the number of nights a property is available and
+its cost?  Properties that are available for a majority of the year are likely 
+taken more seriously as business ventures (indeed they might be purely business
+ventures rather than, say, an individual renting out their converted basement to 
+make some extra money).  The scatter plots below show that for most of the 
+neighborhood groups, price and availability do not appear to be related.  However,
+Manhattan apartments tend to increase in price with their availability. 
+```{r}
+dataset %>%
+  group_by(availability_365, neighbourhood_group) %>%
+  summarise(average_price = mean(price, na.rm = TRUE)) %>%
+  filter(average_price < 1000) %>%
+  ggplot(aes(x = availability_365, y = average_price)) +
+  geom_point() +
+  facet_wrap(~neighbourhood_group)
+```
+
+The scatter plots above also indicate that Manhattan is the most expensive 
+neighbourhood group to rent from, while Queens is the least expensive.  To view
+the distribution of price by neighbourhood group, we'll plot another violin plot
+(below).  This plot has its y-axis (price) on a log10 scale because while there
+are a wide range of prices, most properties are priced less than 200.  Without
+the log scale, it would be hard to see the distribution among properties in this
+price range.  The plot confirms that Manhattan is the most expensive area - only
+25% of its properties are priced at less than $100/night, but Bronx, Queens,
+and Staten Island all have close to 75% of their properties for less than 
+$100/night.
+
+```{r}
+ggplot(dataset, aes(x = neighbourhood_group, y = price)) +
+  geom_violin(draw_quantiles = c(0.25, 0.50, 0.75)) +
+  scale_y_log10()
+```
+```
+
