@@ -9,6 +9,10 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(DataExplorer)
+library(ggpubr)
+library(leaflet)
+library(leaflet.extras)
+library(sqldf)
 
 dataset <- read_csv("Data/AB_NYC_2019.csv")
 ```
@@ -149,8 +153,8 @@ dataset %>%
 
 ```{r}
 dataset %>%
-  ggplot(aes(x = neighbourhood_group, y = availability_365)) +
-  geom_violin()
+  ggviolin(x = "neighbourhood_group", y = "availability_365",
+           trim = TRUE, xlab = "Neighbourhood Group", ylab = "Days Available")
 ```
 
 Is there a relationship between the number of nights a property is available and
@@ -171,20 +175,100 @@ dataset %>%
 ```
 
 The scatter plots above also indicate that Manhattan is the most expensive 
-neighbourhood group to rent from, while Queens is the least expensive.  To view
-the distribution of price by neighbourhood group, we'll plot another violin plot
-(below).  This plot has its y-axis (price) on a log10 scale because while there
-are a wide range of prices, most properties are priced less than 200.  Without
-the log scale, it would be hard to see the distribution among properties in this
-price range.  The plot confirms that Manhattan is the most expensive area - only
-25% of its properties are priced at less than $100/night, but Bronx, Queens,
+neighbourhood group to rent from, while Queens, Bronx, and Staten Island all look
+similarly inexpensive.
+
+To view the distribution of price by neighbourhood group, we'll plot another 
+violin plot (below).  This plot has its y-axis (price) on a log10 scale because 
+while there are a wide range of prices, most properties are priced less than 200.  
+Without the log scale, it would be hard to see the distribution among properties 
+in this price range.  The plot confirms that Manhattan is the most expensive area 
+- only 25% of its properties are priced at less than $100/night, but Bronx, Queens,
 and Staten Island all have close to 75% of their properties for less than 
 $100/night.
 
 ```{r}
-ggplot(dataset, aes(x = neighbourhood_group, y = price)) +
-  geom_violin(draw_quantiles = c(0.25, 0.50, 0.75)) +
-  scale_y_log10()
+ggviolin(dataset, x = "neighbourhood_group", y = "price", 
+         trim = TRUE, yscale = "log10", draw_quantiles = c(0.25, 0.5, 0.75))
 ```
+
+To view the prices on a map, we'll use the leaflet package.  We'll bin the 
+locations into a rectangular grid and calculate the average price within each
+grid.  A continuous color palette will allow us to visualize the magnitude of 
+the average price.  Note that we could also plot the individual locations, coloring
+each point based on the price.  However, since there are 50,000 locations it would
+be difficult to get a sense for the distribution.
+
+We can see that the most expensive area to rent is Manhattan (confirming
+what we already saw in the violin plots above).  However, we can now also see
+that the most expensive regions to rent are located along the waterfronts!
+
+```{r}
+# create a data frame where each row is the (long1, long2, lat1, lat2)
+# coordinates in a 50 x 50 grid covering the longitude and latitude range
+# present in the data set.
+long_part = 50
+lat_part = 50
+
+long_delt = (max(dataset$longitude) - min(dataset$longitude)) / long_part
+lat_delt = (max(dataset$latitude) - min(dataset$latitude)) / lat_part
+
+longs = seq(min(dataset$longitude), max(dataset$longitude), by = long_delt)
+lats  = seq(min(dataset$latitude), max(dataset$latitude), by = lat_delt)
+
+grid <- expand.grid(longs, lats)
+
+names(grid) <- c("long1", "lat1")
+
+grid <- grid %>%
+  mutate(long2 = long1 + long_delt, lat2 = lat1 + lat_delt) 
+
+to_plot <- filter(dataset, !is.na(longitude) & !is.na(latitude))
+
+# conditionally join the grid to the original data set so that each location
+# is identified with a square in the grid.  we could also do a cartesian join
+# and then filter based on containment using dplyr, but this could potentially
+# cause OOM issues on some machines --- there are 2,500 grid points and 50,000
+# locations.
+merged <- sqldf('SELECT
+         long1, long2, lat1, lat2, longitude, latitude, id, price
+       FROM
+         grid
+         LEFT JOIN dataset
+         ON longitude >= long1
+            AND longitude < long2
+            AND latitude >= lat1
+            AND latitude < lat2
+       WHERE
+         longitude IS NOT NULL
+         AND latitude IS NOT NULL')
+
+# get the average price per square and create a palette based on the (natural)
+# log of those values
+squares <- merged %>%
+  group_by(long1, long2, lat1, lat2) %>%
+  summarise(price = mean(price, na.rm = T), obs = n())
+
+pal <- colorNumeric(
+  palette = "YlGnBu",
+  domain = range(log(squares$price))
+)
+
+myf <- function(x) { round(exp(1) ^ x, -2) }
+
+leaflet(squares) %>%
+  addTiles() %>%
+  addRectangles(lng1 = ~long1, lat1 = ~lat1, lng2 = ~long2, lat2 = ~lat2,
+                fillColor = ~pal(log(squares$price)),
+                fillOpacity = 0.7,
+                popup = ~price,
+                weight = 1,
+                smoothFactor = 0.2) %>%
+  addLegend(pal = pal, values = ~log(price), title = "Price", labFormat = labelFormat(transform = myf))
+
 ```
+
+
+
+
 
