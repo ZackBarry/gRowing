@@ -273,10 +273,11 @@ leaflet(squares) %>%
 
 
 ```{r}
+# don't include neighbourhood, lat, or long in model - highly correlated with the response variable, neighbourhood_group
 to_model <- dataset %>%
-  select(neighbourhood_group, latitude, longitude, room_type, price,
+  select(neighbourhood_group, room_type, price,
          minimum_nights, number_of_reviews, reviews_per_month,
-         availability_365, days_since_review)
+         availability_365, days_since_review, id)
 
 test <- to_model %>%
   group_by(neighbourhood_group) %>%
@@ -287,9 +288,51 @@ train <- to_model %>%
 ```
 
 ```{r}
+library(h2o)
 
+# start and connect to H2O instance; defaults to using all available threads
+h2o.init()
+
+# don't show progress bar during h2o processes
+h2o.no_progress()
+
+train_h2o <- as.h2o(train)
+train_h2o["neighbourhood_group"] <- as.factor(train_h2o["neighbourhood_group"])
+train_h2o["room_type"] <- as.factor(train_h2o["room_type"])
+
+test_h2o <- as.h2o(test)
+test_h2o["neighbourhood_group"] <- as.factor(test_h2o["neighbourhood_group"])
+test_h2o["room_type"] <- as.factor(test_h2o["room_type"])
+
+response <- "neighbourhood_group"
+features <- setdiff(colnames(train_h2o), c(response, "id"))
+
+h2o_gbm <- h2o.gbm(
+  x = features,
+  y = response,
+  training_frame = train_h2o,
+  nfolds = 10,
+  distribution = "multinomial"
+)
+
+h2o.varimp_plot(h2o_gbm)
+
+h2o.performance(h2o_gbm, test_h2o)
 ```
 
+```{r}
+h2o_xgb <- h2o.xgboost(
+  x = features,
+  y = response,
+  training_frame = train_h2o,
+  nfolds = 10,
+  distribution = "multinomial"
+)
+
+h2o.varimp_plot(h2o_xgb)
+
+h2o.performance(h2o_xgb, test_h2o)
+```
 
 
 
