@@ -273,14 +273,14 @@ leaflet(squares) %>%
 
 
 ```{r}
-# don't include neighbourhood, lat, or long in model - highly correlated with the response variable, neighbourhood_group
+# don't include neighbourhood_group in model - highly correlated with neighborhood
 to_model <- dataset %>%
-  select(neighbourhood_group, room_type, price,
+  select(neighbourhood, latitude, longitude, room_type, price,
          minimum_nights, number_of_reviews, reviews_per_month,
          availability_365, days_since_review, id)
 
 test <- to_model %>%
-  group_by(neighbourhood_group) %>%
+  group_by(room_type) %>%
   sample_frac(0.2)
 
 train <- to_model %>%
@@ -297,22 +297,21 @@ h2o.init()
 h2o.no_progress()
 
 train_h2o <- as.h2o(train)
-train_h2o["neighbourhood_group"] <- as.factor(train_h2o["neighbourhood_group"])
+train_h2o["neighbourhood"] <- as.factor(train_h2o["neighbourhood"])
 train_h2o["room_type"] <- as.factor(train_h2o["room_type"])
 
 test_h2o <- as.h2o(test)
-test_h2o["neighbourhood_group"] <- as.factor(test_h2o["neighbourhood_group"])
+test_h2o["neighbourhood"] <- as.factor(test_h2o["neighbourhood"])
 test_h2o["room_type"] <- as.factor(test_h2o["room_type"])
 
-response <- "neighbourhood_group"
+response <- "room_type"
 features <- setdiff(colnames(train_h2o), c(response, "id"))
 
 h2o_gbm <- h2o.gbm(
   x = features,
   y = response,
   training_frame = train_h2o,
-  nfolds = 10,
-  distribution = "multinomial"
+  nfolds = 10
 )
 
 h2o.varimp_plot(h2o_gbm)
@@ -325,8 +324,7 @@ h2o_xgb <- h2o.xgboost(
   x = features,
   y = response,
   training_frame = train_h2o,
-  nfolds = 10,
-  distribution = "multinomial"
+  nfolds = 10
 )
 
 h2o.varimp_plot(h2o_xgb)
@@ -334,6 +332,46 @@ h2o.varimp_plot(h2o_xgb)
 h2o.performance(h2o_xgb, test_h2o)
 ```
 
+```{r}
+library(imbalance)
+library(caret)
+
+dmy <- dummyVars("room_type ~ .", data = train, fullRank = T)  # fullRank = T makes it so that there are 4 columns for a 5 level variable
+
+train_dmy <- data.frame(predict(dmy, newdata = train))  # this leaves out room_type
+train_dmy <- cbind(train_dmy, select(train, room_type))
+test_dmy <- data.frame(predict(dmy, newdata = test))
+
+new_samples <- mwmote(
+  train_dmy,
+  numInstances = 15000,
+  classAttr = "room_type"
+)
+
+train_balanced <- rbind(train_dmy, new_samples)
+
+train_balanced_h2o <- as.h2o(train_balanced)
+train_balanced_h2o["room_type"] <- as.factor(train_balanced_h2o["room_type"])
+
+response <- "room_type"
+features <- setdiff(colnames(train_balanced_h2o), c(response, "id"))
+
+h2o_balanced_xgb <- h2o.xgboost(
+  x = features,
+  y = response,
+  training_frame = train_balanced_h2o,
+  nfolds = 10
+)
+
+h2o.varimp_plot(h2o_balanced_xgb)
+
+h2o.performance(h2o_xgb, test_h2o)
+```
+
+
+```{r}
+# catboost
+```
 
 
 
