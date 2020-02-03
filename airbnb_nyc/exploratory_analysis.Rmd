@@ -268,25 +268,85 @@ leaflet(squares) %>%
 
 ```
 
-## Predictions.
+## Prepare features for modeling.
 
-
+We'll be predicting price as a function of most of the features in the original dataset.
+`id`, `host_id`, and `host_name` will dropped since they are mostly distinct across
+the observations.  
 
 ```{r}
-# don't include neighbourhood_group in model - highly correlated with neighborhood
 to_model <- dataset %>%
-  select(neighbourhood, latitude, longitude, room_type, price,
+  select(price, neighbourhood, latitude, longitude, room_type, neighbourhood_group, 
          minimum_nights, number_of_reviews, reviews_per_month,
-         availability_365, days_since_review, id)
-
-test <- to_model %>%
-  group_by(room_type) %>%
-  sample_frac(0.2)
-
-train <- to_model %>%
-  filter(!(id %in% test$id))
+         availability_365, calculated_host_listings_count, days_since_review) 
 ```
 
+Price as log
+```{r}
+to_model <- to_model %>%
+  filter(price != 0) %>%
+  mutate(log_price = log(price)) %>%
+  select(-price)
+```
+
+```{r}
+library(caret)
+
+dmy <- dummyVars("~ .", data = to_model, fullRank = T)  # fullRank = T makes it so that there are 4 columns for a 5 level variable
+
+to_model <- data.frame(predict(dmy, newdata = to_model))  
+```
+
+
+## Predictions via XGBoost.
+
+
+Split into train and test
+```{r}
+to_model <- to_model %>%
+  mutate(id = row_number())
+
+train <- to_model %>%
+  sample_frac(0.8)
+
+test <- anti_join(to_model, train, by = "id")
+```
+
+Set response and features
+```{r}
+response <- "log_price"
+features <- setdiff(colnames(to_model), c(response, "id"))
+```
+
+Helper functions
+```{r}
+mse_unlog <- function(pred_log, true_log) {
+  pred <- exp(pred_log)
+  true <- exp(true_log)
+  
+  mean((pred - true) ^ 2)
+}
+
+rmse_unlog <- function(pred_log, true_log) {
+  pred <- exp(pred_log)
+  true <- exp(true_log)
+  
+  sqrt(mean((pred - true) ^ 2))
+}
+```
+
+
+Baseline model MSE and RMSE.
+```{r}
+mean_log_price <- mean(train$log_price)
+pred_log_price <- rep(mean_log_price, nrow(test))
+true_log_price <- test$log_price
+
+mse_unlog(pred_log_price, true_log_price)
+rmse_unlog(pred_log_price, true_log_price)
+```
+
+H2O preprocessing
 ```{r}
 library(h2o)
 
@@ -297,80 +357,35 @@ h2o.init()
 h2o.no_progress()
 
 train_h2o <- as.h2o(train)
-train_h2o["neighbourhood"] <- as.factor(train_h2o["neighbourhood"])
-train_h2o["room_type"] <- as.factor(train_h2o["room_type"])
-
-test_h2o <- as.h2o(test)
-test_h2o["neighbourhood"] <- as.factor(test_h2o["neighbourhood"])
-test_h2o["room_type"] <- as.factor(test_h2o["room_type"])
-
-response <- "room_type"
-features <- setdiff(colnames(train_h2o), c(response, "id"))
-
-h2o_gbm <- h2o.gbm(
-  x = features,
-  y = response,
-  training_frame = train_h2o,
-  nfolds = 10
-)
-
-h2o.varimp_plot(h2o_gbm)
-
-h2o.performance(h2o_gbm, test_h2o)
+test_h2o  <- as.h2o(test)
 ```
 
+
+Default XGB
 ```{r}
 h2o_xgb <- h2o.xgboost(
   x = features,
   y = response,
   training_frame = train_h2o,
-  nfolds = 10
+  nfolds = 5,
+  distribution = "gaussian"
 )
 
-h2o.varimp_plot(h2o_xgb)
-
 h2o.performance(h2o_xgb, test_h2o)
+
+h2o_pred <- h2o.predict(h2o_gbm, test_h2o) %>% as.vector()
+
+rmse_unlog(h2o_pred, true_log_price)
 ```
 
 ```{r}
-library(imbalance)
-library(caret)
 
-dmy <- dummyVars("room_type ~ .", data = train, fullRank = T)  # fullRank = T makes it so that there are 4 columns for a 5 level variable
-
-train_dmy <- data.frame(predict(dmy, newdata = train))  # this leaves out room_type
-train_dmy <- cbind(train_dmy, select(train, room_type))
-test_dmy <- data.frame(predict(dmy, newdata = test))
-
-new_samples <- mwmote(
-  train_dmy,
-  numInstances = 15000,
-  classAttr = "room_type"
-)
-
-train_balanced <- rbind(train_dmy, new_samples)
-
-train_balanced_h2o <- as.h2o(train_balanced)
-train_balanced_h2o["room_type"] <- as.factor(train_balanced_h2o["room_type"])
-
-response <- "room_type"
-features <- setdiff(colnames(train_balanced_h2o), c(response, "id"))
-
-h2o_balanced_xgb <- h2o.xgboost(
-  x = features,
-  y = response,
-  training_frame = train_balanced_h2o,
-  nfolds = 10
-)
-
-h2o.varimp_plot(h2o_balanced_xgb)
-
-h2o.performance(h2o_xgb, test_h2o)
 ```
 
 
 ```{r}
 # catboost
+
 ```
 
 
