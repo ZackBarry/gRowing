@@ -159,7 +159,7 @@ dataset %>%
 
 Looking at the density of observations of `price` vs. the normal distribution drawn from the same mean and standard deviation, it is obvious they are quite different. The bottom left hand blot below shows the quantile-quantile (QQ) plot for `price` vs. normal distribution; if `price` was normally distributed, the line would be close to straight.  If we apply a log transformation to `price` and compare the result to the normal distribution, they are much more closely aligned.  Indeed, the QQ plot in the bottom right is much more linear.  Many statistical models assume that the response variable follows a normal distribution.  When we attempt to predict `price` further down, we will apply a log transformation so that our model predicts `log(price)`.  The true price prediction can then be extracted.
 
-Note: `price` is sometimes 0, and $log(0)$ is undefined.  To avoid this problem, we apply the transformation $log(price + 1)$.
+Note: `price` is sometimes 0, and $\log(0)$ is undefined.  To avoid this problem, we apply the transformation $\log(price + 1)$.
 
 ```{r}
 mean <- mean(dataset$price)
@@ -308,7 +308,9 @@ We'll be predicting price as a function of most of the features in the original 
 `id`, `host_id`, and `host_name` will dropped since they are mostly distinct across the observations.
 Categorical variables are one-hot encoded with full rank; that is, a categorical variable with N levels
 will be encoded into N-1 columns so that no linear dependences are induced between columns. Finally,
-price will be log-scaled to make its distribution closer to the uniform distribution.
+price will be log-scaled to make its distribution closer to the uniform distribution.  As discussed
+above, the transformation will be $price\rightarrow \log(price + 1)$ instead of 
+$price\rightarrow\log(price)$ since `price` is sometimes 0 and $\log(0)$ is undefined.
 
 Select relevant columns:
 ```{r}
@@ -318,20 +320,20 @@ to_model <- dataset %>%
          availability_365, calculated_host_listings_count, days_since_review) 
 ```
 
-Price as log
+Log-transform price:
 ```{r}
 to_model <- to_model %>%
-  filter(price != 0) %>%
-  mutate(log_price = log(price)) %>%
+  mutate(log_price = log(price + 1)) %>%
   select(-price)
 ```
 
 # lasso fusion categorical https://stats.stackexchange.com/questions/146907/principled-way-of-collapsing-categorical-variables-with-many-levels
 
+One-hot encoding:
 ```{r}
 library(caret)
 
-dmy <- dummyVars("~ .", data = to_model, fullRank = T)  # fullRank = T makes it so that there are 4 columns for a 5 level variable
+dmy <- dummyVars("~ .", data = to_model, fullRank = T)
 
 to_model <- data.frame(predict(dmy, newdata = to_model))  
 ```
