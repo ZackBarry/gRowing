@@ -157,6 +157,39 @@ dataset %>%
            trim = TRUE, xlab = "Neighbourhood Group", ylab = "Days Available")
 ```
 
+Looking at the density of observations of `price` vs. the normal distribution drawn from the same mean and standard deviation, it is obvious they are quite different. The bottom left hand blot below shows the quantile-quantile (QQ) plot for `price` vs. normal distribution; if `price` was normally distributed, the line would be close to straight.  If we apply a log transformation to `price` and compare the result to the normal distribution, they are much more closely aligned.  Indeed, the QQ plot in the bottom right is much more linear.  Many statistical models assume that the response variable follows a normal distribution.  When we attempt to predict `price` further down, we will apply a log transformation so that our model predicts `log(price)`.  The true price prediction can then be extracted.
+
+Note: `price` is sometimes 0, and $log(0)$ is undefined.  To avoid this problem, we apply the transformation $log(price + 1)$.
+
+```{r}
+mean <- mean(dataset$price)
+sd <- sd(dataset$price)
+normal_sample <- rnorm(1000, mean = mean, sd = sd)
+
+ggplot(dataset, aes(x = price)) +
+  stat_function(fun = dnorm, n = 100, args = list(mean = mean, sd = sd), color = "red") +
+  labs(title = "Price Density vs. Normal Distribution", ylab = "") +
+  geom_density() +
+  ggthemes::theme_tufte()
+
+qqplot(normal_sample, dataset$price) +
+  title("QQ Plot: Price vs. Normal")
+
+mean_log <- mean(log(dataset$price + 1))
+sd_log <- sd(log(dataset$price + 1))
+normal_sample_log <- rnorm(1000, mean = mean_log, sd = sd_log)
+
+ggplot(dataset, aes(x = log(price + 1))) +
+  stat_function(fun = dnorm, n = 100, args = list(mean = mean_log, sd = sd_log), color = "red") +
+  labs(title = "Log Price Density vs. Normal Distribution", ylab = "") +
+  geom_density() +
+  ggthemes::theme_tufte()
+
+qqplot(normal_sample, log(dataset$price)) +
+  title("QQ Plot: Log Price vs. Normal")
+
+```
+
 Is there a relationship between the number of nights a property is available and
 its cost?  Properties that are available for a majority of the year are likely 
 taken more seriously as business ventures (indeed they might be purely business
@@ -268,12 +301,16 @@ leaflet(squares) %>%
 
 ```
 
+
 ## Prepare features for modeling.
 
-We'll be predicting price as a function of most of the features in the original dataset.
-`id`, `host_id`, and `host_name` will dropped since they are mostly distinct across
-the observations.  
+We'll be predicting price as a function of most of the features in the original dataset. In particular,
+`id`, `host_id`, and `host_name` will dropped since they are mostly distinct across the observations.
+Categorical variables are one-hot encoded with full rank; that is, a categorical variable with N levels
+will be encoded into N-1 columns so that no linear dependences are induced between columns. Finally,
+price will be log-scaled to make its distribution closer to the uniform distribution.
 
+Select relevant columns:
 ```{r}
 to_model <- dataset %>%
   select(price, neighbourhood, latitude, longitude, room_type, neighbourhood_group, 
@@ -289,6 +326,8 @@ to_model <- to_model %>%
   select(-price)
 ```
 
+# lasso fusion categorical https://stats.stackexchange.com/questions/146907/principled-way-of-collapsing-categorical-variables-with-many-levels
+
 ```{r}
 library(caret)
 
@@ -300,9 +339,15 @@ to_model <- data.frame(predict(dmy, newdata = to_model))
 
 ## Predictions via XGBoost.
 
+We'll be leveraging H2O's implementation of XGBoost to predict a rental's price, using grid search to approximate the optimal model parameters.  
+
+`id`, `host_id`, and `host_name` will dropped since they are mostly distinct across
+the observations.  
 
 Split into train and test
 ```{r}
+set.seed(1234)
+
 to_model <- to_model %>%
   mutate(id = row_number())
 
@@ -336,7 +381,7 @@ rmse_unlog <- function(pred_log, true_log) {
 ```
 
 
-Baseline model MSE and RMSE.
+Baseline model MSE and RMSE and R^2 (= 1 - sum_squared_error / sum_error_mean_model)
 ```{r}
 mean_log_price <- mean(train$log_price)
 pred_log_price <- rep(mean_log_price, nrow(test))
@@ -368,18 +413,46 @@ h2o_xgb <- h2o.xgboost(
   y = response,
   training_frame = train_h2o,
   nfolds = 5,
+  ntrees = 50,
+  learn_rate = 0.3,
   distribution = "gaussian"
 )
 
 h2o.performance(h2o_xgb, test_h2o)
 
-h2o_pred <- h2o.predict(h2o_gbm, test_h2o) %>% as.vector()
+h2o_pred <- h2o.predict(h2o_xgb, test_h2o) %>% as.vector()
 
 rmse_unlog(h2o_pred, true_log_price)
+
+
 ```
 
+Hyperparameter search
 ```{r}
+hyper_parameters <- list(sample_rate = c(0.5, 0.75, 1),
+                         col_sample_rate = c(0.6, 0.8, 1),
+                         max_depth = c(5, 6, 7))
 
+ntrees <- 100
+
+grid <- h2o.grid("xgboost",
+                 hyper_params = hyper_parameters,
+                 x = features,
+                 y = response,
+                 distribution = "gaussian",
+                 training_frame = train_h2o,
+                 nfolds = 5,
+                 ntrees = ntrees,
+                 learn_rate = as.numeric(2 / ntrees)
+)
+
+grid_models <- lapply(grid@model_ids, h2o.getModel)
+
+for (i in 1:length(grid_models)) {
+  h2o_pred <- h2o.predict(grid_models[[i]], test_h2o)
+  rmse <- rmse_unlog(h2o_pred, true_log_price)
+  print(paste0("Model: ", i, " | RMSE: ", rmse))
+}
 ```
 
 
