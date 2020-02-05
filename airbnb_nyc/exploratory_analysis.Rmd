@@ -341,12 +341,9 @@ to_model <- data.frame(predict(dmy, newdata = to_model))
 
 ## Predictions via XGBoost.
 
-We'll be leveraging H2O's implementation of XGBoost to predict a rental's price, using grid search to approximate the optimal model parameters.  
+We'll be leveraging H2O's implementation of XGBoost to predict a rental's price, using grid search to approximate the optimal model parameters.  The naive model of $price = avg(price)$ will be used as a baseline from which to compare the MSE of our model.  Since `price` has been log-transformed for prediction purposes, some helper functions have been defined below to extract `price` from $log(price)$ and calculate the resulting $R^2$ and MSE values.
 
-`id`, `host_id`, and `host_name` will dropped since they are mostly distinct across
-the observations.  
-
-Split into train and test
+Split into train and test:
 ```{r}
 set.seed(1234)
 
@@ -362,28 +359,31 @@ test <- anti_join(to_model, train, by = "id")
 Set response and features
 ```{r}
 response <- "log_price"
-features <- setdiff(colnames(to_model), c(response, "id"))
+features <- setdiff(colnames(to_model), response)
 ```
 
-Helper functions
+Helper functions:
 ```{r}
 mse_unlog <- function(pred_log, true_log) {
-  pred <- exp(pred_log)
-  true <- exp(true_log)
+  pred <- exp(pred_log) - 1
+  true <- exp(true_log) - 1
   
   mean((pred - true) ^ 2)
 }
 
 rmse_unlog <- function(pred_log, true_log) {
-  pred <- exp(pred_log)
-  true <- exp(true_log)
+  pred <- exp(pred_log) - 1
+  true <- exp(true_log) - 1
   
   sqrt(mean((pred - true) ^ 2))
 }
+
+rsquared_unlog <- function(pred_log, true_log) {
+  1 - mse_unlog(pred_log, true_log) / mse_unlog(rep(mean(true_log), length(true_log)), true_log)
+}
 ```
 
-
-Baseline model MSE and RMSE and R^2 (= 1 - sum_squared_error / sum_error_mean_model)
+Baseline model MSE, RMSE, and R^2:
 ```{r}
 mean_log_price <- mean(train$log_price)
 pred_log_price <- rep(mean_log_price, nrow(test))
@@ -391,9 +391,10 @@ true_log_price <- test$log_price
 
 mse_unlog(pred_log_price, true_log_price)
 rmse_unlog(pred_log_price, true_log_price)
+rsquared_unlog(pred_log_price, true_log_price)
 ```
 
-H2O preprocessing
+Start-up H2O and initialize H2O data:
 ```{r}
 library(h2o)
 
@@ -408,7 +409,7 @@ test_h2o  <- as.h2o(test)
 ```
 
 
-Default XGB
+Train XGB with default parameters:
 ```{r}
 h2o_xgb <- h2o.xgboost(
   x = features,
@@ -424,12 +425,12 @@ h2o.performance(h2o_xgb, test_h2o)
 
 h2o_pred <- h2o.predict(h2o_xgb, test_h2o) %>% as.vector()
 
+mse_unlog(h2o_pred, true_log_price)
 rmse_unlog(h2o_pred, true_log_price)
-
-
+rsquared_unlog(h2o_pred, true_log_price)
 ```
 
-Hyperparameter search
+Hyperparameter search:
 ```{r}
 hyper_parameters <- list(sample_rate = c(0.5, 0.75, 1),
                          col_sample_rate = c(0.6, 0.8, 1),
