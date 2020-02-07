@@ -13,6 +13,7 @@ library(ggpubr)
 library(leaflet)
 library(leaflet.extras)
 library(sqldf)
+library(patchwork)
 
 dataset <- read_csv("Data/AB_NYC_2019.csv")
 ```
@@ -166,28 +167,35 @@ mean <- mean(dataset$price)
 sd <- sd(dataset$price)
 normal_sample <- rnorm(1000, mean = mean, sd = sd)
 
-ggplot(dataset, aes(x = price)) +
+p1 <- ggplot(dataset, aes(x = price)) +
   stat_function(fun = dnorm, n = 100, args = list(mean = mean, sd = sd), color = "red") +
   labs(title = "Price Density vs. Normal Distribution", ylab = "") +
   geom_density() +
   ggthemes::theme_tufte()
 
-qqplot(normal_sample, dataset$price) +
-  title("QQ Plot: Price vs. Normal")
+p2 <- ggplot(dataset, aes(sample = price)) +
+    stat_qq() +
+    stat_qq_line() +
+    labs(title = "QQ Plot: Price vs. Theoretical Normal", ylab = "") +
+    ggthemes::theme_tufte()
 
 mean_log <- mean(log(dataset$price + 1))
 sd_log <- sd(log(dataset$price + 1))
 normal_sample_log <- rnorm(1000, mean = mean_log, sd = sd_log)
 
-ggplot(dataset, aes(x = log(price + 1))) +
+p3 <- ggplot(dataset, aes(x = log(price + 1))) +
   stat_function(fun = dnorm, n = 100, args = list(mean = mean_log, sd = sd_log), color = "red") +
   labs(title = "Log Price Density vs. Normal Distribution", ylab = "") +
   geom_density() +
   ggthemes::theme_tufte()
 
-qqplot(normal_sample, log(dataset$price)) +
-  title("QQ Plot: Log Price vs. Normal")
+p4 <- ggplot(dataset, aes(sample = log(price + 1))) +
+    stat_qq() +
+    stat_qq_line() +
+    labs(title = "QQ Plot: Log Price vs. Theoretical Normal", ylab = "") +
+    ggthemes::theme_tufte()
 
+(p1 + p3) / (p2 + p4)
 ```
 
 Is there a relationship between the number of nights a property is available and
@@ -353,7 +361,11 @@ to_model <- to_model %>%
 train <- to_model %>%
   sample_frac(0.8)
 
-test <- anti_join(to_model, train, by = "id")
+test <- anti_join(to_model, train, by = "id") %>%
+  select(-id)
+
+train <- train %>%
+  select(-id)
 ```
 
 Set response and features
@@ -389,12 +401,12 @@ mean_log_price <- mean(train$log_price)
 pred_log_price <- rep(mean_log_price, nrow(test))
 true_log_price <- test$log_price
 
-mse_unlog(pred_log_price, true_log_price)
-rmse_unlog(pred_log_price, true_log_price)
-rsquared_unlog(pred_log_price, true_log_price)
+sprintf("Baseline MSE: %f", mse_unlog(pred_log_price, true_log_price))
+sprintf("Baseline RMSE: %f", rmse_unlog(pred_log_price, true_log_price))
+sprintf("Baseline R^2: %f", rsquared_unlog(pred_log_price, true_log_price))
 ```
 
-Start-up H2O and initialize H2O data:
+Start-up H2O and initialize H2O data frames:
 ```{r}
 library(h2o)
 
@@ -407,7 +419,6 @@ h2o.no_progress()
 train_h2o <- as.h2o(train)
 test_h2o  <- as.h2o(test)
 ```
-
 
 Train XGB with default parameters:
 ```{r}
@@ -425,19 +436,23 @@ h2o.performance(h2o_xgb, test_h2o)
 
 h2o_pred <- h2o.predict(h2o_xgb, test_h2o) %>% as.vector()
 
-mse_unlog(h2o_pred, true_log_price)
-rmse_unlog(h2o_pred, true_log_price)
-rsquared_unlog(h2o_pred, true_log_price)
+sprintf("Default MSE: %f", mse_unlog(h2o_pred, true_log_price))
+sprintf("Default RMSE: %f", rmse_unlog(h2o_pred, true_log_price))
+sprintf("Default R^2: %f", rsquared_unlog(h2o_pred, true_log_price))
 ```
 
 Hyperparameter search:
+
+We'll focus on tuning learning rate, number of trees, number of terminal nodes, and the L1 regularization.  To start with, `ntrees` is set to 200 and the L1 term (`reg_alpha`) is set to 0 (the default value); telescopic search is applied to learning rate alongside evenly spaced values for max depth.
 ```{r}
-hyper_parameters <- list(sample_rate = c(0.5, 0.75, 1),
-                         col_sample_rate = c(0.6, 0.8, 1),
-                         max_depth = c(5, 6, 7))
+ntrees <- 200
+reg_alpha <- 0
 
-ntrees <- 100
-
+hyper_parameters <- list(
+  learn_rate = c(0.0001, 0.001, 0.01, 0.1, 1),
+  max_depth = c(2, 5, 8, 11)
+)
+tictoc::tic()
 grid <- h2o.grid("xgboost",
                  hyper_params = hyper_parameters,
                  x = features,
@@ -446,24 +461,97 @@ grid <- h2o.grid("xgboost",
                  training_frame = train_h2o,
                  nfolds = 5,
                  ntrees = ntrees,
-                 learn_rate = as.numeric(2 / ntrees)
+                 reg_alpha = 0
 )
-
+tictoc::toc() #1100
 grid_models <- lapply(grid@model_ids, h2o.getModel)
 
-for (i in 1:length(grid_models)) {
-  h2o_pred <- h2o.predict(grid_models[[i]], test_h2o)
-  rmse <- rmse_unlog(h2o_pred, true_log_price)
-  print(paste0("Model: ", i, " | RMSE: ", rmse))
-}
+# get results in a table with parameters
+results <- do.call(
+  rbind,
+  lapply(grid@model_ids, function(x) {
+    model <- h2o.getModel(x)
+    h2o_pred <- h2o.predict(model, test_h2o)
+    data.frame(
+      mse = mse_unlog(h2o_pred, true_log_price),
+      r2 = rsquared_unlog(h2o_pred, true_log_price),
+      learn_rate = model@allparameters$learn_rate,
+      max_depth = model@allparameters$max_depth
+    )
+  })
+)
+
+write_csv(results, "020620_learn_rate_and_max_depth_cv_error.csv")
 ```
 
+The plots below show that a learn rate of 0.1 results in models with consistently lower cross-validated test MSE and R^2 values, regardless of the max depth.  Learn rates of 0.001 and 0.00001 perform consistently worse. Also, as max depth increases, the performance tends to decline.  Next, we'll fine tune max depth for a fixed learning rate of 0.1 before testing different values of the L1 regularization parameter.
+```{r}
+p1 <- ggplot(results, aes(x = max_depth, y = mse, color = factor(learn_rate))) +
+  geom_point() +
+  geom_line() +
+  ggthemes::theme_tufte() +
+  labs(title = "MSE vs. Max Depth", x = "Max Depth", y = "MSE") 
+
+p2 <- ggplot(results, aes(x = max_depth, y = r2, color = factor(learn_rate))) +
+  geom_point() +
+  geom_line() +
+  ggthemes::theme_tufte() +
+  labs(title = "R^2 vs. Max Depth", x = "Max Depth", y = "R^2") 
+
+p1 + p2
+```
 
 ```{r}
-# catboost
+ntrees <- 200
+reg_alpha <- 0
+learn_rate <- 0.1
 
+hyper_parameters <- list(
+  max_depth = c(1, 2, 3, 4, 5)
+)
+tictoc::tic()
+grid <- h2o.grid("xgboost",
+                 hyper_params = hyper_parameters,
+                 x = features,
+                 y = response,
+                 distribution = "gaussian",
+                 training_frame = train_h2o,
+                 nfolds = 5,
+                 ntrees = ntrees,
+                 learn_rate = learn_rate,
+                 reg_alpha = 0
+)
+tictoc::toc() #202
+
+# get results in a table with parameters
+results_2 <- do.call(
+  rbind,
+  lapply(grid@model_ids, function(x) {
+    model <- h2o.getModel(x)
+    h2o_pred <- h2o.predict(model, test_h2o)
+    data.frame(
+      mse = mse_unlog(h2o_pred, true_log_price),
+      r2 = rsquared_unlog(h2o_pred, true_log_price),
+      max_depth = model@allparameters$max_depth
+    )
+  })
+)
+
+p1 <- ggplot(results_2, aes(x = max_depth, y = mse)) +
+  geom_point() +
+  geom_line() +
+  ggthemes::theme_tufte() +
+  labs(title = "MSE vs. Max Depth", x = "Max Depth", y = "MSE") 
+
+p2 <- ggplot(results_2, aes(x = max_depth, y = r2)) +
+  geom_point() +
+  geom_line() +
+  ggthemes::theme_tufte() +
+  labs(title = "R^2 vs. Max Depth", x = "Max Depth", y = "R^2") 
+
+p1 + p2
 ```
 
+## Conclusion
 
-
-
+We were able to use XGBoost to predict rental prices much more effectively than the baseline model.  Before hyperparameter tuning, the MSE and R^2 values were XXX and YYY; tuning the learning rate, depth, and L1 regularization parameters led to final MSE and R^2 values of XXX and YYY.  The most important predictors turned out to be AAA and BBB, which makes sense because __________.  It would be interesting to create features using the names of the listings to see if name has a noticeable impact on the predictive accuracy of the model.
