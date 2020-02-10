@@ -377,7 +377,7 @@ response <- "log_price"
 features <- setdiff(colnames(to_model), response)
 ```
 
-Helper functions:
+Helper functions: remove log transformations from predictions and true results before calculating MSE and R^2.
 ```{r}
 mse_unlog <- function(pred_log, true_log) {
   pred <- exp(pred_log) - 1
@@ -386,30 +386,34 @@ mse_unlog <- function(pred_log, true_log) {
   mean((pred - true) ^ 2)
 }
 
-rmse_unlog <- function(pred_log, true_log) {
-  pred <- exp(pred_log) - 1
-  true <- exp(true_log) - 1
-  
-  sqrt(mean((pred - true) ^ 2))
-}
-
 rsquared_unlog <- function(pred_log, true_log) {
   1 - mse_unlog(pred_log, true_log) / mse_unlog(rep(mean(true_log), length(true_log)), true_log)
 }
+```
 
-get_unlogged_cv_mse <- function(model, true_result_vec) {
+Helper function: we'll be estimating the test MSE for each model fitted on the training data using cross validation.  However, since our response variable has been log-transformed, the CV MSE returned by H2O will be the CV MSE for the logged data. The function below takes the CV predictions from an H2O model for which `keep_cross_validation_predictions = TRUE` has been set and removes the log transformation before calculating the CV MSE. Note: the H2O package (in R) does not accept custom error functions.
+```{r}
+get_cv_predictions_as_df <- function(model) {
   
-  # Combine CV predictions into a data.frame. Note: The cross validation predictions have the same number of rows as the entire input training frame with 0s filled in for all rows that are not in the hold out.
+    # Combine CV predictions into a data.frame. Note: The cross validation predictions have the same number of rows as the entire input training frame with 0s filled in for all rows that are not in the hold out.
   cv_predictions <- h2o.cross_validation_predictions(model)
   cv_predictions <- lapply(cv_predictions, as.data.frame)
   cv_df <- do.call("cbind", cv_predictions)
-  names(cv_df) <- paste0(names(cv_df), "_", 1:ncol(cv_df))
-
-  # Get the fold assignment of each CV set so that the rows that are not in the hold out can be set to NA.  Note: the fold assignment of column i is i - 1.
+  
+    # Get the fold assignment of each CV set so that the rows that are not in the hold out can be set to NA.  If the nth row of the fold_assignment vector is equal to i, then the i+1th row of column i is not set to NA, otherwise it is set to NA.
   fold_assignment_vec <- as.vector(h2o.cross_validation_fold_assignment(model))
   for (i in 1:ncol(cv_df)) {
     cv_df[, i][fold_assignment_vec != i - 1] <- NA
   }
+  
+  cv_df
+  
+}
+
+
+get_unlogged_cv_mse <- function(model, true_result_vec) {
+  
+  cv_df <- get_cv_predictions_as_df(model)
   
   # Calculate the difference between the hold out predictions and the true training result, removing the log transormation beforehand.
   cv_df <- apply(cv_df, 2, function(x) exp(x) - exp(true_result_vec))
@@ -419,7 +423,30 @@ get_unlogged_cv_mse <- function(model, true_result_vec) {
   mean(as.vector(mses))
   
 }
+
+
 ```
+
+```{r}
+get_unlogged_baseline_mse <- function(model, true_result_vec) {
+  
+  cv_df <- get_cv_predictions_as_df(model)
+
+  for (i in 1:ncol(cv_df)) {
+    cv_true_result_vec <- true_result_vec
+    cv_true_result_vec[is.na(cv_df)[, i]] <- NA
+    cv_baseline_estimate <- mean(exp(cv_true_result_vec), na.rm = T)
+    cv_df[, i][!is.na(cv_df[, i])] <- cv_baseline_estimate
+  }
+  
+  # Calculate the difference between the hold out predictions and the true training result, removing the log transormation beforehand.
+  cv_df <- apply(cv_df, 2, function(x) x - exp(true_result_vec))
+
+  # Calculate the MSE for each hold out set and then average the results to get the final CV MSE
+  mses <- apply(cv_df, 2, function(x) sum(x^2, na.rm = T) / length(x[!is.na(x)]))
+  mean(as.vector(mses))
+  
+}
 ```
 
 Baseline model MSE, RMSE, and R^2:
@@ -457,7 +484,8 @@ h2o_xgb <- h2o.xgboost(
   ntrees = 50,
   learn_rate = 0.3,
   distribution = "gaussian",
-  keep_cross_validation_predictions = TRUE
+  keep_cross_validation_predictions = TRUE,
+  keep_cross_validation_fold_assignment = TRUE
 )
 
 get_unlogged_cv_mse(h2o_xgb, train$log_price)
@@ -465,13 +493,13 @@ get_unlogged_cv_mse(h2o_xgb, train$log_price)
 
 Hyperparameter search:
 
-We'll focus on tuning learning rate, number of trees, number of terminal nodes, and the L1 regularization.  To start with, `ntrees` is set to 200 and the L1 term (`reg_alpha`) is set to 0 (the default value); telescopic search is applied to learning rate alongside evenly spaced values for max depth.
+We'll focus on tuning learning rate, number of trees, number of terminal nodes, and the L1 regularization parameter.  To start with, `ntrees` is set to 200 and the L1 term (`reg_alpha`) is set to 0 (the default value); telescopic search is applied to learning rate alongside evenly spaced values for `max_depth`.
 ```{r}
 ntrees <- 200
 reg_alpha <- 0
 
 hyper_parameters <- list(
-  learn_rate = c(0.0001, 0.001, 0.01, 0.1, 1),
+  learn_rate = c(0.001, 0.01, 0.1, 1),
   max_depth = c(2, 5, 8, 11)
 )
 tictoc::tic()
@@ -480,6 +508,8 @@ grid <- h2o.grid("xgboost",
                  x = features,
                  y = response,
                  distribution = "gaussian",
+                 keep_cross_validation_predictions = TRUE,
+                 keep_cross_validation_fold_assignment = TRUE,
                  training_frame = train_h2o,
                  nfolds = 5,
                  ntrees = ntrees,
@@ -494,33 +524,38 @@ results <- do.call(
   lapply(grid@model_ids, function(x) {
     model <- h2o.getModel(x)
     data.frame(
-      mse = h2o.mse(model),
-      r2 = h2o.r2(model),
+      mse_logged = h2o.mse(model),
+      mse        = get_unlogged_cv_mse(model, train$log_price),
+      mse_baseline = get_unlogged_baseline_mse(model, train$log_price),
       learn_rate = model@allparameters$learn_rate,
-      max_depth = model@allparameters$max_depth
+      max_depth  = model@allparameters$max_depth
     )
   })
 )
 
-write_csv(results, "020620_learn_rate_and_max_depth_cv_error.csv")
+write_csv(results, "020920_learn_rate_and_max_depth_cv_error.csv")
 ```
 
-The plots below show that a learn rate of 0.1 results in models with consistently lower cross-validated test MSE and R^2 values, regardless of the max depth.  Learn rates of 0.001 and 0.00001 perform consistently worse. Also, as max depth increases, the performance tends to decline.  Next, we'll fine tune max depth for a fixed learning rate of 0.1 before testing different values of the L1 regularization parameter.
+The plots below show that learn rates of 0.01 and 0.001 never perform better than the baseline model.  However, learn rates of 0.1 and 1 have lower CV MSE than the baseline for each value of max depth.  Learn rate 0.1 performs better than learn rate 1 for most values of max depth, but not for small values of max depth (<= 3).  We need to be careful about using higher values for max depth since (in general), bias increases with max depth.  With that in mind, we'll next fine tune max depth for a fixed learning rate of 0.1 before testing different values of the L1 regularization parameter.
 ```{r}
 p1 <- ggplot(results, aes(x = max_depth, y = mse, color = factor(learn_rate))) +
+  ylim(0.975 * min(results$mse), 1.025 * max(results$mse)) +
   geom_point() +
   geom_line() +
   ggthemes::theme_tufte() +
   labs(title = "MSE vs. Max Depth", x = "Max Depth", y = "MSE") 
 
-p2 <- ggplot(results, aes(x = max_depth, y = r2, color = factor(learn_rate))) +
+p2 <- ggplot(results, aes(x = max_depth, y = mse_baseline, color = factor(learn_rate))) +
+  ylim(0.975 * min(results$mse), 1.025 * max(results$mse)) +
   geom_point() +
-  geom_line() +
+  geom_line() + 
   ggthemes::theme_tufte() +
-  labs(title = "R^2 vs. Max Depth", x = "Max Depth", y = "R^2") 
+  labs(title = "Baseline MSE")
 
 p1 + p2
 ```
+
+
 
 ```{r}
 ntrees <- 200
@@ -528,7 +563,7 @@ reg_alpha <- 0
 learn_rate <- 0.1
 
 hyper_parameters <- list(
-  max_depth = c(1, 2, 3, 4, 5)
+  max_depth = c(5, 8, 11, 14, 17)
 )
 tictoc::tic()
 grid <- h2o.grid("xgboost",
@@ -536,24 +571,27 @@ grid <- h2o.grid("xgboost",
                  x = features,
                  y = response,
                  distribution = "gaussian",
+                 keep_cross_validation_predictions = TRUE,
+                 keep_cross_validation_fold_assignment = TRUE,
                  training_frame = train_h2o,
                  nfolds = 5,
                  ntrees = ntrees,
                  learn_rate = learn_rate,
                  reg_alpha = 0
 )
-tictoc::toc() #202
+tictoc::toc() #485
 
 # get results in a table with parameters
 results_2 <- do.call(
   rbind,
   lapply(grid@model_ids, function(x) {
     model <- h2o.getModel(x)
-    h2o_pred <- h2o.predict(model, test_h2o)
     data.frame(
-      mse = mse_unlog(h2o_pred, true_log_price),
-      r2 = rsquared_unlog(h2o_pred, true_log_price),
-      max_depth = model@allparameters$max_depth
+      mse_logged = h2o.mse(model),
+      mse        = get_unlogged_cv_mse(model, train$log_price),
+      mse_baseline = get_unlogged_baseline_mse(model, train$log_price),
+      #learn_rate = model@allparameters$learn_rate,
+      max_depth  = model@allparameters$max_depth
     )
   })
 )
@@ -564,7 +602,7 @@ p1 <- ggplot(results_2, aes(x = max_depth, y = mse)) +
   ggthemes::theme_tufte() +
   labs(title = "MSE vs. Max Depth", x = "Max Depth", y = "MSE") 
 
-p2 <- ggplot(results_2, aes(x = max_depth, y = r2)) +
+p2 <- ggplot(results_2, aes(x = max_depth, y = mse_baseline)) +
   geom_point() +
   geom_line() +
   ggthemes::theme_tufte() +
