@@ -335,8 +335,6 @@ to_model <- to_model %>%
   select(-price)
 ```
 
-# lasso fusion categorical https://stats.stackexchange.com/questions/146907/principled-way-of-collapsing-categorical-variables-with-many-levels
-
 One-hot encoding:
 ```{r}
 library(caret)
@@ -347,7 +345,7 @@ to_model <- data.frame(predict(dmy, newdata = to_model))
 ```
 
 
-## Predictions via XGBoost.
+## Training XGBoost
 
 We'll be leveraging H2O's implementation of XGBoost to predict a rental's price, using grid search to approximate the optimal model parameters.  The naive model of $price = avg(price)$ will be used as a baseline from which to compare the MSE of our model.  Since `price` has been log-transformed for prediction purposes, some helper functions have been defined below to extract `price` from $log(price)$ and calculate the resulting $R^2$ and MSE values.
 
@@ -449,17 +447,6 @@ get_unlogged_baseline_mse <- function(model, true_result_vec) {
 }
 ```
 
-Baseline model MSE, RMSE, and R^2:
-```{r}
-mean_log_price_train <- mean(train$log_price)
-pred_log_price <- rep(mean_log_price_train, nrow(test))
-true_log_price_test  <- test$log_price
-
-sprintf("Baseline MSE: %f", mse_unlog(pred_log_price, true_log_price_test))
-sprintf("Baseline RMSE: %f", rmse_unlog(pred_log_price, true_log_price_test))
-sprintf("Baseline R^2: %f", rsquared_unlog(pred_log_price, true_log_price_test))
-```
-
 Start-up H2O and initialize H2O data frames:
 ```{r}
 library(h2o)
@@ -550,13 +537,12 @@ p2 <- ggplot(results, aes(x = max_depth, y = mse_baseline, color = factor(learn_
   geom_point() +
   geom_line() + 
   ggthemes::theme_tufte() +
-  labs(title = "Baseline MSE")
+  labs(title = "Baseline MSE", x = "MSE", y = "Max Depth")
 
 p1 + p2
 ```
 
-
-
+Below, the cross-validated MSE is plotted against max depth values in the set (5, 8, 11, 14, 17).  Learn rate is fixed at 0.1 based on the results above.  We see that the model outperforms the baseline estimate for each max depth and that larger values of max depth tend to outperform smaller values.  However, we are also cautious about choosing too large a value for max depth and overfitting the data.  There appears to be diminishing returns in MSE improvements for max depth values higher than 11. 
 ```{r}
 ntrees <- 200
 reg_alpha <- 0
@@ -596,51 +582,178 @@ results_2 <- do.call(
   })
 )
 
+ymin <- 0.975 * min(c(results_2$mse, results_2$mse_baseline))
+ymax <- 1.025 * max(c(results_2$mse, results_2$mse_baseline))
+
 p1 <- ggplot(results_2, aes(x = max_depth, y = mse)) +
+  ylim(ymin, ymax) +
   geom_point() +
   geom_line() +
   ggthemes::theme_tufte() +
-  labs(title = "MSE vs. Max Depth", x = "Max Depth", y = "MSE") 
+  labs(title = "MSE vs. Max Depth \n Learn Rate = 0.1", x = "Max Depth", y = "MSE") 
 
 p2 <- ggplot(results_2, aes(x = max_depth, y = mse_baseline)) +
+  ylim(ymin, ymax) +
   geom_point() +
-  geom_line() +
+  geom_line() + 
   ggthemes::theme_tufte() +
-  labs(title = "R^2 vs. Max Depth", x = "Max Depth", y = "R^2") 
+  labs(title = "Baseline MSE", x = "Max Depth", y = "MSE")
 
 p1 + p2
 ```
 
-## Conclusion
 
-We were able to use XGBoost to predict rental prices much more effectively than the baseline model.  Before hyperparameter tuning, the MSE and R^2 values were XXX and YYY; tuning the learning rate, depth, and L1 regularization parameters led to final MSE and R^2 values of XXX and YYY.  The most important predictors turned out to be AAA and BBB, which makes sense because __________.  It would be interesting to create features using the names of the listings to see if name has a noticeable impact on the predictive accuracy of the model.
-
-
+Based on the results below, we see lower CV MSE for an L1 regularization parameter of 0.6.  Learn rate was fixed at 0.1 and max depth fixed at 11 for this result.  Our final step will be to fine tune the learning rate.
 ```{r}
-get_unlogged_cv_mse <- function(model, true_result_vec) {
-  
-  # Combine CV predictions into a data.frame. Note: The cross validation predictions have the same number of rows as the entire input training frame with 0s filled in for all rows that are not in the hold out.
-  cv_predictions <- h2o.cross_validation_predictions(model)
-  cv_predictions <- lapply(cv_predictions, as.data.frame)
-  cv_df <- do.call("cbind", cv_predictions)
-  names(cv_df) <- paste0(names(cv_df), "_", 1:ncol(cv_df))
+ntrees <- 200
+learn_rate <- 0.1
+max_depth <- 11
 
-  # Get the fold assignment of each CV set so that the rows that are not in the hold out can be set to NA.  Note: the fold assignment of column i is i - 1.
-  fold_assignment_vec <- as.vector(h2o.cross_validation_fold_assignment(model))
-  for (i in 1:ncol(cv_predictions)) {
-    cv_df[, i][fold_assignment_vec != i - 1] <- NA
-  }
-  
-  # Calculate the difference between the hold out predictions and the true training result, removing the log transormation beforehand.
-  for (i in 1:ncol(cv_predictions)) {
-    cv_df[, predict_col_number] <- exp(df[, predict_col_number]) - exp(true_result_vec)
-  }
+hyper_parameters <- list(
+  reg_alpha = c(0, 0.2, 0.4, 0.6, 0.8, 1.0)
+)
+tictoc::tic()
+grid_3 <- h2o.grid("xgboost",
+                 hyper_params = hyper_parameters,
+                 x = features,
+                 y = response,
+                 distribution = "gaussian",
+                 keep_cross_validation_predictions = TRUE,
+                 keep_cross_validation_fold_assignment = TRUE,
+                 training_frame = train_h2o,
+                 nfolds = 5,
+                 ntrees = ntrees,
+                 learn_rate = learn_rate,
+                 max_depth = max_depth
+)
+tictoc::toc() #540
 
-  # Calculate the MSE for each hold out set and then average the results to get the final CV MSE
-  mses <- apply(cv_df, 2, function(x) sum(x^2, na.rm = T) / length(x[!is.na(x)]))
-  mean(as.vector(mses))
-  
-}
+# get results in a table with parameters
+results_3 <- do.call(
+  rbind,
+  lapply(grid_3@model_ids, function(x) {
+    model <- h2o.getModel(x)
+    data.frame(
+      mse_logged = h2o.mse(model),
+      mse        = get_unlogged_cv_mse(model, train$log_price),
+      mse_baseline = get_unlogged_baseline_mse(model, train$log_price),
+      #learn_rate = model@allparameters$learn_rate,
+      reg_alpha  = model@allparameters$reg_alpha
+    )
+  })
+)
+
+ymin <- 0.975 * min(c(results_3$mse, results_3$mse_baseline))
+ymax <- 1.025 * max(c(results_3$mse, results_3$mse_baseline))
+
+p1 <- ggplot(results_3, aes(x = reg_alpha, y = mse)) +
+  ylim(ymin, ymax) +
+  geom_point() +
+  geom_line() +
+  ggthemes::theme_tufte() +
+  labs(title = "MSE vs. Max Depth \n Learn Rate = 0.1 \n Max Depth = 11", x = "L1 Coefficient", y = "MSE") 
+
+p2 <- ggplot(results_3, aes(x = reg_alpha, y = mse_baseline)) +
+  ylim(ymin, ymax) +
+  geom_point() +
+  geom_line() + 
+  ggthemes::theme_tufte() +
+  labs(title = "Baseline MSE", x = "L1 Coefficient", y = "MSE")
+
+p1 + p2
 ```
 
+With max depth set tuned to 11 and the L1 regularization term tuned to 0.6, the optimal learn rate value appears to be near 0.22.  We're now ready to apply our final parameter set to the test set!
+```{r}
+ntrees <- 200
+max_depth <- 11
+reg_alpha <- 0.6
 
+hyper_parameters <- list(
+  learn_rate = c(0.06, 0.1, 0.14, 0.18, 0.22, 0.26)
+)
+tictoc::tic()
+grid_4 <- h2o.grid("xgboost",
+                 hyper_params = hyper_parameters,
+                 x = features,
+                 y = response,
+                 distribution = "gaussian",
+                 keep_cross_validation_predictions = TRUE,
+                 keep_cross_validation_fold_assignment = TRUE,
+                 training_frame = train_h2o,
+                 nfolds = 5,
+                 ntrees = ntrees,
+                 max_depth = max_depth,
+                 reg_alpha = reg_alpha
+)
+tictoc::toc() #550
+
+# get results in a table with parameters
+results_4 <- do.call(
+  rbind,
+  lapply(grid_4@model_ids, function(x) {
+    model <- h2o.getModel(x)
+    data.frame(
+      mse_logged = h2o.mse(model),
+      mse        = get_unlogged_cv_mse(model, train$log_price),
+      mse_baseline = get_unlogged_baseline_mse(model, train$log_price),
+      learn_rate = model@allparameters$learn_rate
+    )
+  })
+)
+
+ymin <- 0.975 * min(c(results_4$mse, results_4$mse_baseline))
+ymax <- 1.025 * max(c(results_4$mse, results_4$mse_baseline))
+
+p1 <- ggplot(results_4, aes(x = learn_rate, y = mse)) +
+  ylim(ymin, ymax) +
+  geom_point() +
+  geom_line() +
+  ggthemes::theme_tufte() +
+  labs(title = "MSE vs. Max Depth \n Learn Rate = 0.1 \n Max Depth = 11", x = "Learn Rate", y = "MSE") 
+
+p2 <- ggplot(results_4, aes(x = learn_rate, y = mse_baseline)) +
+  ylim(ymin, ymax) +
+  geom_point() +
+  geom_line() + 
+  ggthemes::theme_tufte() +
+  labs(title = "Baseline MSE", x = "Learn Rate", y = "MSE")
+
+p1 + p2
+```
+
+## Final model performance
+
+Our final tuned model has an MSE of 5100 (and RMSE of \$71), which is an improvement over the baseline model which has MSE 6400 (RMSE of \$80).  The R^2 value tells us that the tuned model explained 20% of the variance in the test data.
+```{r}
+final_model <- h2o.xgboost(
+                 x = features,
+                 y = response,
+                 distribution = "gaussian",
+                 keep_cross_validation_predictions = TRUE,
+                 keep_cross_validation_fold_assignment = TRUE,
+                 training_frame = train_h2o,
+                 ntrees = 200,
+                 max_depth = 11,
+                 reg_alpha = 0.6,
+                 learn_rate = 0.22
+                )
+
+final_prediction <- h2o.predict(final_model, test_h2o) %>%
+  as.vector()
+
+baseline_pred_log_price <- rep(mean(train$log_price), nrow(test))
+
+sprintf("Baseline MSE: %f", mse_unlog(baseline_pred_log_price, test$log_price))
+sprintf("Tuned XGBoost MSE: %f", mse_unlog(final_prediction, test$log_price))
+sprintf("Tuned XGBoost R2: %f", rsquared_unlog(final_prediction, test$log_price))
+```
+
+## Conclusion
+
+We were able to use XGBoost to predict rental prices much more effectively than the baseline model.  Before hyperparameter tuning, the MSE and R^2 values were XXX and YYY; tuning the learning rate, depth, and L1 regularization parameters led to final MSE and R^2 values of 5100 and 0.2.  The most important predictors turned out to be AAA and BBB, which makes sense because __________.  
+
+Two ideas for future work:
+
+1) Create features using the names of the listings to see if name has a noticeable impact on the predictive accuracy of the model.
+2) Reduce the complexity of the feature space by combining some of the one-hot encoded neighborhoods.  Lasso fusion for categorical variables would be interesting: https://stats.stackexchange.com/questions/146907/principled-way-of-collapsing-categorical-variables-with-many-levels.
