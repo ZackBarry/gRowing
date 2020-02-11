@@ -2,10 +2,18 @@
 title: "exploratory_analysis"
 author: "ZackBarry"
 date: "1/5/2020"
-output: html_document
+output: 
+  html_document:
+   number_sections: true
+   toc: true
+   fig_width: 7
+   fig_height: 4.5
+   theme: cosmo
+   highlight: tango
+   code_folding: show
 ---
 
-```{r setup, include=FALSE}
+```{r setup, message = FALSE, warning = FALSE }
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(DataExplorer)
@@ -14,75 +22,52 @@ library(leaflet)
 library(leaflet.extras)
 library(sqldf)
 library(patchwork)
+library(caret)
+library(knitr)
+library(DT)
 
 dataset <- read_csv("Data/AB_NYC_2019.csv")
 ```
 
-## Abstract
+# Introduction
 
+Airbnb is one of the most prominent online marketplaces for reserving travel lodgings. It hosts vacation rentals all over the globe, hosting over two million people each night.  However, Airbnb does not actually own any of the properties it lists.  Rather, it facilates connections between owners and renters.  At its core, Airbnb is truly a data company.  Each rental has a myriad of labels and restrictions: which days they are available, cost, location, ameneties, host descriptions... the list goes on.  
 
+The data set we'll be exploring in this document is a collection of property data from Airbnb in New York City. 
 
 ## Data source
 
-This data set has nearly 50,000 observations of 16 different variables, 6 of 
-which are discrete and 10 of which are continuous.
+This data set has nearly 50,000 observations of 16 different variables, 6 of which are discrete and 10 of which are continuous.
+
+***
+
+# Pre-Modeling Stages
 
 ## Acquiring/Loading Data
 
-```{r}
-dataset <- read_csv("Data/AB_NYC_2019.csv")
-head(dataset)
+A high-level overview of the types of variables / amount of missing data shows that we have 10 continuous and 6 discrete variables.  Most rows have no missing values, and the total number of missing observations is quite low.  Since there are 50,000 observations to draw from, we should be able to generate some great insights!
+
+```{r, message = FALSE, warning = FALSE }
+datatable(head(dataset, 5), rownames = F, options = list(pageLength = 5, scrollX = T))
 ```
 
-```{r}
-# print size of data set
-dim(dataset)
-```
-
-```{r}
-# high-level overview of data types and missing data
+```{r, message = FALSE, warning = FALSE }
 plot_intro(dataset)
 ```
 
-A high-level overview of the types of variables / amount of missing data shows 
-that we have 10 continuous and 6 discrete variables.  Most rows have no missing
-values, and the total number of missing observations is quite low.  Since
-there are 50,000 observations to draw from, we should be able to generate some
-great insights!
-
 ## Data Wrangling
 
-```{r}
-# check which data is missing
+Missing observations are mostly limited to `reviews_per_month` and `last_review`. Upon further investigation, these missing observations occur when `number_of_reviews` is equal to 0.  This makes sense because if a property has never received any reviews there is no concept of "most recent review" nor can a rate of reviews be calculated.  However, it makes sense to set `reviews_per_month` to 0 when it is missing.  For `last_review`, we'll replace it with a new variable `days_since_review`.  Each non-missing observation is formatted YYYY-MM-DD so this will be easy to do.  Furthermore we can replace the missing values with -1 so that the new variable is prepped for modeling.
+
+```{r, message = FALSE, warning = FALSE }
 plot_missing(dataset)
 ```
 
-```{r}
-# further investigate missing data
-dataset %>%
-  filter(is.na(reviews_per_month) | is.na(last_review)) %>%
-  count(number_of_reviews)
-```
-
-Missing observations are mostly limited to `reviews_per_month` and `last_review`.
-Upon further investigation, these missing observations occur when `number_of_reviews`
-is equal to 0.  This makes sense because if a property has never received any
-reviews there is no concept of "most recent review" nor can a rate of reviews be
-calculated.  However, it makes sense to set `reviews_per_month` to 0 when it is
-missing.  For `last_review`, we'll replace it with a new variable 
-`days_since_review`.  Each non-missing observation is formatted YYYY-MM-DD 
-so this will be easy to do.  Furthermore we can replace the missing values with
--1 so that the new variable is prepped for modeling.
-
-```{r}
-# handle missing `reviews_per_month`
+Replace missing `reviews_per_month` with 0 and replace `last_review` with `days_since_last_review` where -1 stands in for missing values.
+```{r, message = FALSE, warning = FALSE }
 dataset <- dataset %>%
   mutate(reviews_per_month = replace_na(reviews_per_month, 0))
-```
 
-```{r}
-# handle missing `last_review` by creating `days_since_review` with -1 standing
-# in for missing values
 dataset <- dataset %>%
   mutate(
     last_review = as.Date(last_review, "%Y-%m-%d"),
@@ -93,66 +78,45 @@ dataset <- dataset %>%
   select(-c(last_review, latest_review_day))
 ```
 
-The other missing observations are in the `host_name` and `name` variables.  
-Since there is already a `host_id` field, these are not needed for identifying
-distinct hosts.  If we were to use these variables for modeling purposes, we
-could replace their missing values with `host_id`.  However, using `name` opens
-up privacy and discrimination concerns that we should avoid.
-```{r}
-# drop host_name and name as protected information
+The other missing observations are in the `host_name` and `name` variables. Since there is already a `host_id` field, these are not needed for identifying distinct hosts.  If we were to use these variables for modeling purposes, we could replace their missing values with `host_id`.  However, using `name` opens up privacy and discrimination concerns that we should avoid. We'll drop both fields for this analysis.
+
+```{r, message = FALSE, warning = FALSE }
 dataset <- select(dataset, -c(name, host_name))
 ```
 
 ## Exploring and visualizating data.
 
-The bar plots below give further insight into our discrete (categorical)
-variables.  Our `neighbourhood_group` observations are limited to 5 neighborhood 
-groups, with Manhattan and Brooklyn comprising the majority.  Room type is mostly 
-evenly split between "entire home/apt" and "private room", with "shared room" 
-rarely appearing.  Unsurprisingly, `days_since_review` has too many distinct 
-categories to plot - it should probably be treated as a continuous variable.
-Finally, there are 221 distinct neighborhoods within our neighborhood groups.
-```{r}
+The bar plots below give further insight into our discrete (categorical) variables.  Our `neighbourhood_group` observations are limited to 5 neighborhood groups, with Manhattan and Brooklyn comprising the majority.  Room type is mostly evenly split between "entire home/apt" and "private room", with "shared room" rarely appearing.  Unsurprisingly, `days_since_review` has too many distinct categories to plot - it should probably be treated as a continuous variable. Finally, there are 221 distinct neighborhoods within our neighborhood groups.
+
+```{r, message = FALSE, warning = FALSE }
 DataExplorer::plot_bar(dataset)
 ```
 
-```{r}
+```{r, message = FALSE, warning = FALSE }
 # neighborhood-specific room_type occurences
 dataset %>%
   count(neighbourhood_group, room_type) %>%
-  arrange(room_type, desc(n))
+  arrange(room_type, desc(n)) %>%
+  kable(caption = "neighborhood-specific room type counts")
 ```
 
-```{r}
+```{r, message = FALSE, warning = FALSE }
 # count of distinct neighbourhoods per group
 dataset %>%
   distinct(neighbourhood_group, neighbourhood) %>%
-  count(neighbourhood_group)
+  count(neighbourhood_group) %>%
+  kable(caption = "distinct neighborhood per neighborhood group")
 ```
 
 
 Let's further investigate our continuous variables via histograms:
-```{r}
+```{r, message = FALSE, warning = FALSE }
 plot_histogram(dataset)
 ```
 
-We see that `id` is fairly evenly distributed, while most other metrics are
-right-skewed.  `latidue` and `longitude` indicate that the properties are
-distributed across an oval with the center having a higher concentration of
-properties.  `availability_365` is 0 in ~17,500 cases (~37% of observations).
-As shown in the violin plot below, Brooklyn and Manhattan have the largest 
-number of 0 availability properties and are skewed heavily towards having
-less nights available. Bronx and Staten Island are more evenly distributed. We 
-might infer that there are more home/apartment owners in Brooklyn and Manhattan
-who are renting out their property for a small portion of the year.
+We see that `id` is fairly evenly distributed, while most other metrics are right-skewed.  `latidue` and `longitude` indicate that the properties are distributed across an oval with the center having a higher concentration of properties.  `availability_365` is 0 in ~17,500 cases (~37% of observations). As shown in the violin plot below, Brooklyn and Manhattan have the largest number of 0 availability properties and are skewed heavily towards having less nights available. Bronx and Staten Island are more evenly distributed. We might infer that there are more home/apartment owners in Brooklyn and Manhattan who are renting out their property for a small portion of the year.
 
-```{r}
-dataset %>%
-  filter(availability_365 == 0) %>%
-  nrow()
-```
-
-```{r}
+```{r, message = FALSE, warning = FALSE }
 dataset %>%
   ggviolin(x = "neighbourhood_group", y = "availability_365",
            trim = TRUE, xlab = "Neighbourhood Group", ylab = "Days Available")
@@ -162,7 +126,7 @@ Looking at the density of observations of `price` vs. the normal distribution dr
 
 Note: `price` is sometimes 0, and $\log(0)$ is undefined.  To avoid this problem, we apply the transformation $\log(price + 1)$.
 
-```{r}
+```{r, message = FALSE, warning = FALSE }
 mean <- mean(dataset$price)
 sd <- sd(dataset$price)
 normal_sample <- rnorm(1000, mean = mean, sd = sd)
@@ -198,14 +162,8 @@ p4 <- ggplot(dataset, aes(sample = log(price + 1))) +
 (p1 + p3) / (p2 + p4)
 ```
 
-Is there a relationship between the number of nights a property is available and
-its cost?  Properties that are available for a majority of the year are likely 
-taken more seriously as business ventures (indeed they might be purely business
-ventures rather than, say, an individual renting out their converted basement to 
-make some extra money).  The scatter plots below show that for most of the 
-neighborhood groups, price and availability do not appear to be related.  However,
-Manhattan apartments tend to increase in price with their availability. 
-```{r}
+Is there a relationship between the number of nights a property is available and its cost?  Properties that are available for a majority of the year are likely  taken more seriously as business ventures (indeed they might be purely business ventures rather than, say, an individual renting out their converted basement to  make some extra money).  The scatter plots below show that for most of the  neighborhood groups, price and availability do not appear to be related.  However, Manhattan apartments tend to increase in price with their availability.  We also see that Manhattan is the most expensive neighbourhood group to rent from, while Queens, Bronx, and Staten Island all look similarly inexpensive.
+```{r, message = FALSE, warning = FALSE }
 dataset %>%
   group_by(availability_365, neighbourhood_group) %>%
   summarise(average_price = mean(price, na.rm = TRUE)) %>%
@@ -215,36 +173,18 @@ dataset %>%
   facet_wrap(~neighbourhood_group)
 ```
 
-The scatter plots above also indicate that Manhattan is the most expensive 
-neighbourhood group to rent from, while Queens, Bronx, and Staten Island all look
-similarly inexpensive.
+To view the distribution of price by neighbourhood group, we'll plot another violin plot (below).  This plot has its y-axis (price) on a log10 scale because  while there are a wide range of prices, most properties are priced less than 200.  Without the log scale, it would be hard to see the distribution among properties  in this price range.  The plot confirms that Manhattan is the most expensive area - only 25% of its properties are priced at less than \$100/night, but Bronx, Queens, and Staten Island all have close to 75% of their properties for less than $100/night.
 
-To view the distribution of price by neighbourhood group, we'll plot another 
-violin plot (below).  This plot has its y-axis (price) on a log10 scale because 
-while there are a wide range of prices, most properties are priced less than 200.  
-Without the log scale, it would be hard to see the distribution among properties 
-in this price range.  The plot confirms that Manhattan is the most expensive area 
-- only 25% of its properties are priced at less than $100/night, but Bronx, Queens,
-and Staten Island all have close to 75% of their properties for less than 
-$100/night.
-
-```{r}
-ggviolin(dataset, x = "neighbourhood_group", y = "price", 
+```{r, message = FALSE, warning = FALSE }
+ggviolin(dataset, x = "neighbourhood_group", y = "price",
          trim = TRUE, yscale = "log10", draw_quantiles = c(0.25, 0.5, 0.75))
 ```
 
-To view the prices on a map, we'll use the leaflet package.  We'll bin the 
-locations into a rectangular grid and calculate the average price within each
-grid.  A continuous color palette will allow us to visualize the magnitude of 
-the average price.  Note that we could also plot the individual locations, coloring
-each point based on the price.  However, since there are 50,000 locations it would
-be difficult to get a sense for the distribution.
+To view the prices on a map, we'll use the leaflet package.  We'll bin the  locations into a rectangular grid and calculate the average price within each grid.  A continuous color palette will allow us to visualize the magnitude of  the average price.  Note that we could also plot the individual locations, coloring each point based on the price.  However, since there are 50,000 locations it would be difficult to get a sense for the distribution.
 
-We can see that the most expensive area to rent is Manhattan (confirming
-what we already saw in the violin plots above).  However, we can now also see
-that the most expensive regions to rent are located along the waterfronts!
+We can see that the most expensive area to rent is Manhattan (confirming what we already saw in the violin plots above). However, we can now also see that the most expensive regions to rent are located along the waterfronts!
 
-```{r}
+```{r, message = FALSE, warning = FALSE }
 # create a data frame where each row is the (long1, long2, lat1, lat2)
 # coordinates in a 50 x 50 grid covering the longitude and latitude range
 # present in the data set.
@@ -262,7 +202,7 @@ grid <- expand.grid(longs, lats)
 names(grid) <- c("long1", "lat1")
 
 grid <- grid %>%
-  mutate(long2 = long1 + long_delt, lat2 = lat1 + lat_delt) 
+  mutate(long2 = long1 + long_delt, lat2 = lat1 + lat_delt)
 
 to_plot <- filter(dataset, !is.na(longitude) & !is.na(latitude))
 
@@ -309,48 +249,40 @@ leaflet(squares) %>%
 
 ```
 
+***
+
+# Modeling Stages
+
+We'll be leveraging H2O's implementation of XGBoost to predict a rental's price, using grid search to approximate the optimal model parameters.  The naive model of $price = avg(price)$ will be used as a baseline from which to compare the MSE of our model.  As discussed above, the response variable will be log-transformed to get us closer to a normal distribution.  This transformation introduces extra complexity in our model selection process - if we select parameters based on the ability of the model to predict `log(price)`, we may not be selecting the best parameters for predicting the resulting `price`.  Some custom helper functions are written below to transform predicted `log(price)` values back into `price` values before calculating MSE and R^2 values.
 
 ## Prepare features for modeling.
 
-We'll be predicting price as a function of most of the features in the original dataset. In particular,
-`id`, `host_id`, and `host_name` will dropped since they are mostly distinct across the observations.
-Categorical variables are one-hot encoded with full rank; that is, a categorical variable with N levels
-will be encoded into N-1 columns so that no linear dependences are induced between columns. Finally,
-price will be log-scaled to make its distribution closer to the uniform distribution.  As discussed
-above, the transformation will be $price\rightarrow \log(price + 1)$ instead of 
-$price\rightarrow\log(price)$ since `price` is sometimes 0 and $\log(0)$ is undefined.
+We'll be predicting price as a function of most of the features in the original dataset. In particular, `id`, `host_id`, and `host_name` will dropped since they are mostly distinct across the observations. Categorical variables are one-hot encoded with full rank; that is, a categorical variable with N levels will be encoded into N-1 columns so that no linear dependences are induced between columns. Finally, price will be log-scaled to make its distribution closer to the uniform distribution.  As discussed above, the transformation will be $price\rightarrow \log(price + 1)$ instead of  $price\rightarrow\log(price)$ since `price` is sometimes 0 and $\log(0)$ is undefined.
 
 Select relevant columns:
-```{r}
+```{r, message = FALSE, warning = FALSE }
 to_model <- dataset %>%
-  select(price, neighbourhood, latitude, longitude, room_type, neighbourhood_group, 
+  select(price, neighbourhood, latitude, longitude, room_type, neighbourhood_group,
          minimum_nights, number_of_reviews, reviews_per_month,
-         availability_365, calculated_host_listings_count, days_since_review) 
+         availability_365, calculated_host_listings_count, days_since_review)
 ```
 
 Log-transform price:
-```{r}
+```{r, message = FALSE, warning = FALSE }
 to_model <- to_model %>%
   mutate(log_price = log(price + 1)) %>%
   select(-price)
 ```
 
 One-hot encoding:
-```{r}
-library(caret)
-
+```{r, message = FALSE, warning = FALSE }
 dmy <- dummyVars("~ .", data = to_model, fullRank = T)
 
-to_model <- data.frame(predict(dmy, newdata = to_model))  
+to_model <- data.frame(predict(dmy, newdata = to_model))
 ```
 
-
-## Training XGBoost
-
-We'll be leveraging H2O's implementation of XGBoost to predict a rental's price, using grid search to approximate the optimal model parameters.  The naive model of $price = avg(price)$ will be used as a baseline from which to compare the MSE of our model.  Since `price` has been log-transformed for prediction purposes, some helper functions have been defined below to extract `price` from $log(price)$ and calculate the resulting $R^2$ and MSE values.
-
 Split into train and test:
-```{r}
+```{r, message = FALSE, warning = FALSE }
 set.seed(1234)
 
 to_model <- to_model %>%
@@ -370,17 +302,22 @@ to_model <- to_model %>%
 ```
 
 Set response and features
-```{r}
+```{r, message = FALSE, warning = FALSE }
 response <- "log_price"
 features <- setdiff(colnames(to_model), response)
 ```
 
-Helper functions: remove log transformations from predictions and true results before calculating MSE and R^2.
-```{r}
+
+## Helper functions for reporting. 
+
+Since `price` has been log-transformed for prediction purposes, some helper functions have been defined below to extract `price` from $log(price)$ and calculate the resulting $R^2$ and MSE values.  These functions will be important when we tune our model's parameters for optimal performance.  If we optimize towards lower values of the MSE of the log result, we may not actually be improving the MSE of the unlogged result.
+
+Remove log transformations from predictions and true results before calculating MSE and R^2:
+```{r, message = FALSE, warning = FALSE }
 mse_unlog <- function(pred_log, true_log) {
   pred <- exp(pred_log) - 1
   true <- exp(true_log) - 1
-  
+
   mean((pred - true) ^ 2)
 }
 
@@ -389,45 +326,41 @@ rsquared_unlog <- function(pred_log, true_log) {
 }
 ```
 
-Helper function: we'll be estimating the test MSE for each model fitted on the training data using cross validation.  However, since our response variable has been log-transformed, the CV MSE returned by H2O will be the CV MSE for the logged data. The function below takes the CV predictions from an H2O model for which `keep_cross_validation_predictions = TRUE` has been set and removes the log transformation before calculating the CV MSE. Note: the H2O package (in R) does not accept custom error functions.
-```{r}
+We'll be estimating the test MSE for each model fitted on the training data using cross validation.  However, since our response variable has been log-transformed, the CV MSE returned by H2O will be the CV MSE for the logged data. The functions below takes the CV predictions from an H2O model for which `keep_cross_validation_predictions = TRUE` and `keep_cross_validation_fold_assignment = TRUE` have been set and removes the log transformation before calculating the CV MSE. A function for calculating the baseline MSE is also included. Note: the H2O package (in R) does not accept custom error functions.
+```{r, message = FALSE, warning = FALSE }
 get_cv_predictions_as_df <- function(model) {
-  
+
     # Combine CV predictions into a data.frame. Note: The cross validation predictions have the same number of rows as the entire input training frame with 0s filled in for all rows that are not in the hold out.
   cv_predictions <- h2o.cross_validation_predictions(model)
   cv_predictions <- lapply(cv_predictions, as.data.frame)
   cv_df <- do.call("cbind", cv_predictions)
-  
+
     # Get the fold assignment of each CV set so that the rows that are not in the hold out can be set to NA.  If the nth row of the fold_assignment vector is equal to i, then the i+1th row of column i is not set to NA, otherwise it is set to NA.
   fold_assignment_vec <- as.vector(h2o.cross_validation_fold_assignment(model))
   for (i in 1:ncol(cv_df)) {
     cv_df[, i][fold_assignment_vec != i - 1] <- NA
   }
-  
+
   cv_df
-  
+
 }
 
 
 get_unlogged_cv_mse <- function(model, true_result_vec) {
-  
+
   cv_df <- get_cv_predictions_as_df(model)
-  
+
   # Calculate the difference between the hold out predictions and the true training result, removing the log transormation beforehand.
   cv_df <- apply(cv_df, 2, function(x) exp(x) - exp(true_result_vec))
 
   # Calculate the MSE for each hold out set and then average the results to get the final CV MSE
   mses <- apply(cv_df, 2, function(x) sum(x^2, na.rm = T) / length(x[!is.na(x)]))
   mean(as.vector(mses))
-  
+
 }
 
-
-```
-
-```{r}
 get_unlogged_baseline_mse <- function(model, true_result_vec) {
-  
+
   cv_df <- get_cv_predictions_as_df(model)
 
   for (i in 1:ncol(cv_df)) {
@@ -436,19 +369,47 @@ get_unlogged_baseline_mse <- function(model, true_result_vec) {
     cv_baseline_estimate <- mean(exp(cv_true_result_vec), na.rm = T)
     cv_df[, i][!is.na(cv_df[, i])] <- cv_baseline_estimate
   }
-  
+
   # Calculate the difference between the hold out predictions and the true training result, removing the log transormation beforehand.
   cv_df <- apply(cv_df, 2, function(x) x - exp(true_result_vec))
 
   # Calculate the MSE for each hold out set and then average the results to get the final CV MSE
   mses <- apply(cv_df, 2, function(x) sum(x^2, na.rm = T) / length(x[!is.na(x)]))
   mean(as.vector(mses))
-  
+
 }
 ```
 
-Start-up H2O and initialize H2O data frames:
+We also have a helper function to retrieve parameters of interest from a set of grid search models alongside measures of fit:
 ```{r}
+get_results <- function(h2o_model, true_result) {
+  data.frame(
+    mse_logged = h2o.mse(h2o_model),
+    mse        = get_unlogged_cv_mse(h2o_model, true_result),
+    mse_baseline = get_unlogged_baseline_mse(h2o_model, true_result),
+    learn_rate = h2o_model@allparameters$learn_rate,
+    max_depth  = h2o_model@allparameters$max_depth,
+    reg_alpha  = h2o_model@allparameters$reg_alpha,
+    ntrees     = h2o_model@allparameters$ntrees
+  )
+}
+
+get_grid_results <- function(h2o_grid, true_result) {
+  do.call(
+    rbind,
+    lapply(h2o_grid@model_ids, function(x) {
+      model <- h2o.getModel(x)
+      get_results(model, true_result)
+    })
+  )
+}
+```
+
+
+## Training XGBoost.
+
+Start-up H2O and initialize H2O data frames:
+```{r, message = FALSE, warning = FALSE }
 library(h2o)
 
 # start and connect to H2O instance; defaults to using all available threads
@@ -461,27 +422,12 @@ train_h2o <- as.h2o(train)
 test_h2o  <- as.h2o(test)
 ```
 
-Train XGB with default parameters:
-```{r}
-h2o_xgb <- h2o.xgboost(
-  x = features,
-  y = response,
-  training_frame = train_h2o,
-  nfolds = 5,
-  ntrees = 50,
-  learn_rate = 0.3,
-  distribution = "gaussian",
-  keep_cross_validation_predictions = TRUE,
-  keep_cross_validation_fold_assignment = TRUE
-)
+### Hyperparameter search
 
-get_unlogged_cv_mse(h2o_xgb, train$log_price)
-```
+We'll focus on tuning learning rate, number of trees, number of terminal nodes, and the L1 regularization parameter.  To start with, `ntrees` is set to 200 and the L1 term (`reg_alpha`) is set to 0 (the default value); telescopic search is applied to learning rate alongside evenly spaced values for `max_depth`.  
 
-Hyperparameter search:
-
-We'll focus on tuning learning rate, number of trees, number of terminal nodes, and the L1 regularization parameter.  To start with, `ntrees` is set to 200 and the L1 term (`reg_alpha`) is set to 0 (the default value); telescopic search is applied to learning rate alongside evenly spaced values for `max_depth`.
-```{r}
+The plots below show that learn rates of 0.01 and 0.001 never perform better than the baseline model.  However, learn rates of 0.1 and 1 have lower CV MSE than the baseline for each value of max depth.  Learn rate 0.1 performs better than learn rate 1 for most values of max depth, but not for small values of max depth (<= 3).  We need to be careful about using higher values for max depth since (in general), bias increases with max depth.  With that in mind, we'll next fine tune max depth for a fixed learning rate of 0.1 before testing different values of the L1 regularization parameter.
+```{r, message = FALSE, warning = FALSE }
 ntrees <- 200
 reg_alpha <- 0
 
@@ -489,61 +435,44 @@ hyper_parameters <- list(
   learn_rate = c(0.001, 0.01, 0.1, 1),
   max_depth = c(2, 5, 8, 11)
 )
-tictoc::tic()
+
 grid <- h2o.grid("xgboost",
                  hyper_params = hyper_parameters,
                  x = features,
                  y = response,
+                 ntrees = ntrees,
+                 reg_alpha = reg_alpha,
+                 nfolds = 5,
+                 training_frame = train_h2o,
                  distribution = "gaussian",
                  keep_cross_validation_predictions = TRUE,
-                 keep_cross_validation_fold_assignment = TRUE,
-                 training_frame = train_h2o,
-                 nfolds = 5,
-                 ntrees = ntrees,
-                 reg_alpha = 0
-)
-tictoc::toc() #1100
-grid_models <- lapply(grid@model_ids, h2o.getModel)
-
-# get results in a table with parameters
-results <- do.call(
-  rbind,
-  lapply(grid@model_ids, function(x) {
-    model <- h2o.getModel(x)
-    data.frame(
-      mse_logged = h2o.mse(model),
-      mse        = get_unlogged_cv_mse(model, train$log_price),
-      mse_baseline = get_unlogged_baseline_mse(model, train$log_price),
-      learn_rate = model@allparameters$learn_rate,
-      max_depth  = model@allparameters$max_depth
-    )
-  })
+                 keep_cross_validation_fold_assignment = TRUE
 )
 
-write_csv(results, "020920_learn_rate_and_max_depth_cv_error.csv")
-```
+results <- get_grid_results(grid, train$log_price)
 
-The plots below show that learn rates of 0.01 and 0.001 never perform better than the baseline model.  However, learn rates of 0.1 and 1 have lower CV MSE than the baseline for each value of max depth.  Learn rate 0.1 performs better than learn rate 1 for most values of max depth, but not for small values of max depth (<= 3).  We need to be careful about using higher values for max depth since (in general), bias increases with max depth.  With that in mind, we'll next fine tune max depth for a fixed learning rate of 0.1 before testing different values of the L1 regularization parameter.
-```{r}
+ymin <- 0.975 * min(c(results$mse, results$mse_baseline))
+ymax <- 1.025 * max(c(results$mse, results$mse_baseline))
+
 p1 <- ggplot(results, aes(x = max_depth, y = mse, color = factor(learn_rate))) +
-  ylim(0.975 * min(results$mse), 1.025 * max(results$mse)) +
+  ylim(ymin, ymax) +
   geom_point() +
   geom_line() +
   ggthemes::theme_tufte() +
-  labs(title = "MSE vs. Max Depth", x = "Max Depth", y = "MSE") 
+  labs(title = "MSE vs. Max Depth", x = "Max Depth", y = "MSE")
 
 p2 <- ggplot(results, aes(x = max_depth, y = mse_baseline, color = factor(learn_rate))) +
-  ylim(0.975 * min(results$mse), 1.025 * max(results$mse)) +
+  ylim(ymin, ymax) +
   geom_point() +
-  geom_line() + 
+  geom_line() +
   ggthemes::theme_tufte() +
   labs(title = "Baseline MSE", x = "MSE", y = "Max Depth")
 
 p1 + p2
 ```
 
-Below, the cross-validated MSE is plotted against max depth values in the set (5, 8, 11, 14, 17).  Learn rate is fixed at 0.1 based on the results above.  We see that the model outperforms the baseline estimate for each max depth and that larger values of max depth tend to outperform smaller values.  However, we are also cautious about choosing too large a value for max depth and overfitting the data.  There appears to be diminishing returns in MSE improvements for max depth values higher than 11. 
-```{r}
+Below, the cross-validated MSE is plotted against max depth values in the set (5, 8, 11, 14, 17).  Learn rate is fixed at 0.1 based on the results above.  We see that the model outperforms the baseline estimate for each max depth and that larger values of max depth tend to outperform smaller values.  However, we are also cautious about choosing too large a value for max depth and overfitting the data.  There appears to be diminishing returns in MSE improvements for max depth values higher than 11.
+```{r, message = FALSE, warning = FALSE }
 ntrees <- 200
 reg_alpha <- 0
 learn_rate <- 0.1
@@ -551,8 +480,8 @@ learn_rate <- 0.1
 hyper_parameters <- list(
   max_depth = c(5, 8, 11, 14, 17)
 )
-tictoc::tic()
-grid <- h2o.grid("xgboost",
+
+grid_2 <- h2o.grid("xgboost",
                  hyper_params = hyper_parameters,
                  x = features,
                  y = response,
@@ -565,22 +494,8 @@ grid <- h2o.grid("xgboost",
                  learn_rate = learn_rate,
                  reg_alpha = 0
 )
-tictoc::toc() #485
 
-# get results in a table with parameters
-results_2 <- do.call(
-  rbind,
-  lapply(grid@model_ids, function(x) {
-    model <- h2o.getModel(x)
-    data.frame(
-      mse_logged = h2o.mse(model),
-      mse        = get_unlogged_cv_mse(model, train$log_price),
-      mse_baseline = get_unlogged_baseline_mse(model, train$log_price),
-      #learn_rate = model@allparameters$learn_rate,
-      max_depth  = model@allparameters$max_depth
-    )
-  })
-)
+results_2 <- get_grid_results(grid_2, train$log_price)
 
 ymin <- 0.975 * min(c(results_2$mse, results_2$mse_baseline))
 ymax <- 1.025 * max(c(results_2$mse, results_2$mse_baseline))
@@ -590,12 +505,12 @@ p1 <- ggplot(results_2, aes(x = max_depth, y = mse)) +
   geom_point() +
   geom_line() +
   ggthemes::theme_tufte() +
-  labs(title = "MSE vs. Max Depth \n Learn Rate = 0.1", x = "Max Depth", y = "MSE") 
+  labs(title = "MSE vs. Max Depth \n Learn Rate = 0.1", x = "Max Depth", y = "MSE")
 
 p2 <- ggplot(results_2, aes(x = max_depth, y = mse_baseline)) +
   ylim(ymin, ymax) +
   geom_point() +
-  geom_line() + 
+  geom_line() +
   ggthemes::theme_tufte() +
   labs(title = "Baseline MSE", x = "Max Depth", y = "MSE")
 
@@ -604,7 +519,7 @@ p1 + p2
 
 
 Based on the results below, we see lower CV MSE for an L1 regularization parameter of 0.6.  Learn rate was fixed at 0.1 and max depth fixed at 11 for this result.  Our final step will be to fine tune the learning rate.
-```{r}
+```{r, message = FALSE, warning = FALSE }
 ntrees <- 200
 learn_rate <- 0.1
 max_depth <- 11
@@ -612,36 +527,22 @@ max_depth <- 11
 hyper_parameters <- list(
   reg_alpha = c(0, 0.2, 0.4, 0.6, 0.8, 1.0)
 )
-tictoc::tic()
+
 grid_3 <- h2o.grid("xgboost",
                  hyper_params = hyper_parameters,
                  x = features,
                  y = response,
-                 distribution = "gaussian",
-                 keep_cross_validation_predictions = TRUE,
-                 keep_cross_validation_fold_assignment = TRUE,
-                 training_frame = train_h2o,
-                 nfolds = 5,
                  ntrees = ntrees,
                  learn_rate = learn_rate,
-                 max_depth = max_depth
+                 max_depth = max_depth,
+                 nfolds = 5,
+                 training_frame = train_h2o,                 
+                 distribution = "gaussian",
+                 keep_cross_validation_predictions = TRUE,
+                 keep_cross_validation_fold_assignment = TRUE
 )
-tictoc::toc() #540
 
-# get results in a table with parameters
-results_3 <- do.call(
-  rbind,
-  lapply(grid_3@model_ids, function(x) {
-    model <- h2o.getModel(x)
-    data.frame(
-      mse_logged = h2o.mse(model),
-      mse        = get_unlogged_cv_mse(model, train$log_price),
-      mse_baseline = get_unlogged_baseline_mse(model, train$log_price),
-      #learn_rate = model@allparameters$learn_rate,
-      reg_alpha  = model@allparameters$reg_alpha
-    )
-  })
-)
+results_3 <- get_grid_results(grid_3, train$log_price)
 
 ymin <- 0.975 * min(c(results_3$mse, results_3$mse_baseline))
 ymax <- 1.025 * max(c(results_3$mse, results_3$mse_baseline))
@@ -651,12 +552,12 @@ p1 <- ggplot(results_3, aes(x = reg_alpha, y = mse)) +
   geom_point() +
   geom_line() +
   ggthemes::theme_tufte() +
-  labs(title = "MSE vs. Max Depth \n Learn Rate = 0.1 \n Max Depth = 11", x = "L1 Coefficient", y = "MSE") 
+  labs(title = "MSE vs. Max Depth \n Learn Rate = 0.1 \n Max Depth = 11", x = "L1 Coefficient", y = "MSE")
 
 p2 <- ggplot(results_3, aes(x = reg_alpha, y = mse_baseline)) +
   ylim(ymin, ymax) +
   geom_point() +
-  geom_line() + 
+  geom_line() +
   ggthemes::theme_tufte() +
   labs(title = "Baseline MSE", x = "L1 Coefficient", y = "MSE")
 
@@ -664,7 +565,7 @@ p1 + p2
 ```
 
 With max depth set tuned to 11 and the L1 regularization term tuned to 0.6, the optimal learn rate value appears to be near 0.22.  We're now ready to apply our final parameter set to the test set!
-```{r}
+```{r, message = FALSE, warning = FALSE }
 ntrees <- 200
 max_depth <- 11
 reg_alpha <- 0.6
@@ -672,35 +573,22 @@ reg_alpha <- 0.6
 hyper_parameters <- list(
   learn_rate = c(0.06, 0.1, 0.14, 0.18, 0.22, 0.26)
 )
-tictoc::tic()
+
 grid_4 <- h2o.grid("xgboost",
                  hyper_params = hyper_parameters,
                  x = features,
                  y = response,
-                 distribution = "gaussian",
-                 keep_cross_validation_predictions = TRUE,
-                 keep_cross_validation_fold_assignment = TRUE,
-                 training_frame = train_h2o,
-                 nfolds = 5,
                  ntrees = ntrees,
                  max_depth = max_depth,
-                 reg_alpha = reg_alpha
+                 reg_alpha = reg_alpha,
+                 nfolds = 5,
+                 training_frame = train_h2o,
+                 distribution = "gaussian",
+                 keep_cross_validation_predictions = TRUE,
+                 keep_cross_validation_fold_assignment = TRUE
 )
-tictoc::toc() #550
 
-# get results in a table with parameters
-results_4 <- do.call(
-  rbind,
-  lapply(grid_4@model_ids, function(x) {
-    model <- h2o.getModel(x)
-    data.frame(
-      mse_logged = h2o.mse(model),
-      mse        = get_unlogged_cv_mse(model, train$log_price),
-      mse_baseline = get_unlogged_baseline_mse(model, train$log_price),
-      learn_rate = model@allparameters$learn_rate
-    )
-  })
-)
+results_4 <- get_grid_results(grid_4, train$log_price)
 
 ymin <- 0.975 * min(c(results_4$mse, results_4$mse_baseline))
 ymax <- 1.025 * max(c(results_4$mse, results_4$mse_baseline))
@@ -710,12 +598,12 @@ p1 <- ggplot(results_4, aes(x = learn_rate, y = mse)) +
   geom_point() +
   geom_line() +
   ggthemes::theme_tufte() +
-  labs(title = "MSE vs. Max Depth \n Learn Rate = 0.1 \n Max Depth = 11", x = "Learn Rate", y = "MSE") 
+  labs(title = "MSE vs. Max Depth \n Learn Rate = 0.1 \n Max Depth = 11", x = "Learn Rate", y = "MSE")
 
 p2 <- ggplot(results_4, aes(x = learn_rate, y = mse_baseline)) +
   ylim(ymin, ymax) +
   geom_point() +
-  geom_line() + 
+  geom_line() +
   ggthemes::theme_tufte() +
   labs(title = "Baseline MSE", x = "Learn Rate", y = "MSE")
 
@@ -724,20 +612,20 @@ p1 + p2
 
 ## Final model performance
 
-Our final tuned model has an MSE of 5100 (and RMSE of \$71), which is an improvement over the baseline model which has MSE 6400 (RMSE of \$80).  The R^2 value tells us that the tuned model explained 20% of the variance in the test data.
-```{r}
+Our final tuned model has an MSE of 51500 (and RMSE of \$227), which is an improvement over the baseline model which has MSE 64000 (RMSE of \$252).  The R^2 value tells us that the tuned model explains 20% of the variance in the test data.
+```{r, message = FALSE, warning = FALSE }
 final_model <- h2o.xgboost(
                  x = features,
                  y = response,
-                 distribution = "gaussian",
-                 keep_cross_validation_predictions = TRUE,
-                 keep_cross_validation_fold_assignment = TRUE,
-                 training_frame = train_h2o,
                  ntrees = 200,
                  max_depth = 11,
                  reg_alpha = 0.6,
-                 learn_rate = 0.22
-                )
+                 learn_rate = 0.22,
+                 training_frame = train_h2o,
+                 distribution = "gaussian",
+                 keep_cross_validation_predictions = TRUE,
+                 keep_cross_validation_fold_assignment = TRUE
+)
 
 final_prediction <- h2o.predict(final_model, test_h2o) %>%
   as.vector()
@@ -749,11 +637,26 @@ sprintf("Tuned XGBoost MSE: %f", mse_unlog(final_prediction, test$log_price))
 sprintf("Tuned XGBoost R2: %f", rsquared_unlog(final_prediction, test$log_price))
 ```
 
-## Conclusion
+```{r}
+h2o.varimp_plot(final_model)
+```
 
-We were able to use XGBoost to predict rental prices much more effectively than the baseline model.  Before hyperparameter tuning, the MSE and R^2 values were XXX and YYY; tuning the learning rate, depth, and L1 regularization parameters led to final MSE and R^2 values of 5100 and 0.2.  The most important predictors turned out to be AAA and BBB, which makes sense because __________.  
 
-Two ideas for future work:
+***
+
+# Conclusion
+
+We were able to use XGBoost to predict rental prices much more effectively than the baseline "naive" model.  The baseline model had an MSE of 64000 (RSME of \$252).  Tuning the learning rate, depth, and L1 regularization parameters of the XGBoost model led to a final MSE value of 51500 (RMSE of $\227) and a final R^2 value of 0.2.  These results are as good as we might have hoped, especially for a feature as important to the hospitality business as price.  XGBoost is, however, one of the most popular non-parametric modeling frameworks so we trust that its results are at least similar to what other packages could provide.  The "ideas for improvement" section below suggests some next steps one could take, using this document as a starting point.
+
+Two of the four most important predictors turned out to be whether the room was private or shared.  Due to the one-hot encoding, implictly included is whether the room was the entire home or apartment.  This makes sense because a shared room is likely to command a significantly lower price than a private room or an entire home/apartment.  Longitude and latitude were also important; as we saw in the map in the exploratory analysis section there are regions of NY that are more expensive than others.  This geospatial relationship is reflect in the combination of latitude and longitude.
+
+## Ideas for improvement
 
 1) Create features using the names of the listings to see if name has a noticeable impact on the predictive accuracy of the model.
 2) Reduce the complexity of the feature space by combining some of the one-hot encoded neighborhoods.  Lasso fusion for categorical variables would be interesting: https://stats.stackexchange.com/questions/146907/principled-way-of-collapsing-categorical-variables-with-many-levels.
+3) Use the catboost framework to see if its handling of categorical data outperforms XGBoost.
+
+
+```{r}
+sessionInfo()
+```
