@@ -1,5 +1,6 @@
 ## ui.R ##
 library(shinydashboard)
+library(pl)
 
 header <- dashboardHeader(
     title = "Explore Titanic Features"
