@@ -1,0 +1,204 @@
+---
+title: "Graduate Admissions"
+author: "ZackBarry"
+date: "2/22/2020"
+output: 
+  html_document:
+   number_sections: true
+   toc: true
+   fig_width: 7
+   fig_height: 4.5
+   theme: cosmo
+   highlight: tango
+   code_folding: show
+---
+
+```{r setup, message = FALSE, warning = FALSE }
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(DataExplorer)
+library(ggridges)
+library(reshape2)
+library(ggfortify) # for plotting PCA
+library(leaflet)
+library(leaflet.extras)
+library(sqldf)
+library(patchwork)
+library(caret)
+library(knitr)
+library(DT)
+
+dataset <- read_csv("Data/Admission_Predict_Ver1.1.csv")
+```
+
+GRE Scores ( out of 340 )
+TOEFL Scores ( out of 120 )
+University Rating ( out of 5 )
+Statement of Purpose and Letter of Recommendation Strength ( out of 5 )
+Undergraduate GPA ( out of 10 )
+Research Experience ( either 0 or 1 )
+Chance of Admit ( ranging from 0 to 1 )
+
+# Introduction
+
+## Data source
+
+This data set has nearly 500 observations of 8 different explanatory variables, 6 of which are continuous and 1 of which is binary. 
+***
+
+# Pre-Modeling Stages
+
+## Acquiring/Loading Data
+
+The variable "SOP" stands for "Statement of Purpose Strength"; "LOR" stands for "Letter of Recommendation Strength"; "CGPA" is the student's undergraduate GPA; "Research" is a boolean - 1 for did research, 0 for did not. "Chance of Admit" is the response variable, ranging from 0 to 1.
+
+```{r}
+dataset %>%
+  glimpse()
+```
+
+The field `Serial No.` appears to be an ID, so we'll drop it.  The columns are renamed to be easier to work with.
+
+```{r}
+names(dataset) <- str_replace_all(tolower(names(dataset)), " ", "_")
+dataset <- select(dataset, -serial_no.)
+```
+
+
+## Check for missing/out-of-range values
+
+None of the columns contains any missing data:
+```{r}
+map_df(dataset, is.na) %>%
+  map_df(sum)
+```
+
+Each variable is within the expected range, so there is no apparent need to clean the data.
+```{r}
+rbind(
+  map_df(dataset, min),
+  map_df(dataset, max)
+)
+```
+
+## Distribution of explanatory variables
+
+In this section we check which explanatory variables have enough variance to be useful in explaining the variance in the response variable.
+
+First we'll check on the relationship between each of the continuous explanatory variables and admission chances.  Since each of these variables is a score where higher is better, we'd expect that as the students' scores go up so do their admission chances.  We'll leave the non-student variable `university_rating` for later.
+
+We see that as GRE Score, CPGA, and TOEFL Score increase, the chance of admission also tends to increase.  The relationship between CPGA and admission chance is especially clear.  It will be interested to see how correlated this scores are.  
+```{r}
+continuous_plots <- lapply(
+  c("gre_score", "toefl_score", "cgpa"),
+  function(x) { 
+    wrapr::let(
+      alias = list(X_VAR = x, Y_VAR = "chance_of_admit"),
+      expr = {
+        ggplot(dataset, aes(x = X_VAR, y = Y_VAR)) +
+          geom_point() +
+          theme_bw() +
+          labs(title = paste(x, "vs. admit"), x = x, y = "chance_of_admit")
+      }
+    )
+  }
+)
+
+wrap_plots(continuous_plots, ncol = 2)
+```
+
+Next, consider the distribution of `chance_of_admit` for each level of the letter of recommendation (`lor`) and statement of purpose (`sop`) scores.  The plots are very similar -- admission chances tend to rise alongisde `lor` and `sop`.  The distributions at each level of `sop` seem to have lower variance than for `lor`, indicating that there might be a stronger relationsihip between `sop` and `chance_of_admit` than between `lor` and `chance_of_admit`.  This is interesting because the statement of purporse is entirely student-driven where as letter of recommendations are instructor-driven.
+```{r}
+p1 <- ggplot(dataset, aes(x = chance_of_admit, y = factor(lor))) +
+  geom_density_ridges(aes(fill = factor(lor))) + 
+  theme_bw()
+
+p2 <- ggplot(dataset, aes(x = chance_of_admit, y = factor(sop))) +
+  geom_density_ridges(aes(fill = factor(sop))) +
+  theme_bw()
+
+p1 / p2
+```
+
+The relationship between university rating and admission chances is unsuprising -- the higher ranked the university, the lower the chances of admission.
+```{r}
+ggplot(dataset, aes(x = chance_of_admit, y = factor(university_rating))) +
+  geom_density_ridges(aes(fill = factor(university_rating))) +
+  theme_bw()
+```
+
+Now looking at the number of observations of research vs. no research for different levels of `chance_of_admit`, we see that students who participated in research have higher chance of admission.  In fact, there are no observations of students with higher than a 90\% chance of admission without doing research, and there are very few observations of students with higher than 80\% chance.  However, we should recall from the university rating ridge plot above that most observations where chance of admit is higher than 80\% have university rankings of 4 or 5.
+```{r}
+ggplot(dataset, aes(x = chance_of_admit, fill = factor(research), color = factor(research))) + 
+  geom_histogram(position="identity", alpha=0.6) + 
+  theme_bw()
+```
+
+We see that each variable is moderately correlated with each other variable.  In particular, we see that `cpga`, `gre_score`, and `toefl_score` are all highly correlated with one another and that `cpga` is the most highly correlated with `chance_of_admit`.  We'll explore some dimensionality reduction techniques in the next section.
+```{r}
+cor_matrix <- round(cor(select(dataset, -research)), 2)
+melted_cor_matrix <- melt(cor_matrix)
+
+ggplot(melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white", 
+    midpoint = 0, limit = c(-1,1), space = "Lab", 
+    name="Pearson\nCorrelation"
+  ) +
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1)
+  ) +
+  coord_fixed() +
+  geom_text(aes(Var1, Var2, label = value), color = "black", size = 4) 
+```
+
+## Dimensionality Reduction
+
+Primary Component Analysis (PCA) is a linear algebra technique for combining several correlated variables into a chosen number of uncorrelated variables.  The uncorrelated variables are constructed through linear combinations of the original variables; the uncorrelated variables are successively created to explain as much variance as possible.  Since our dataset has so many highly correlated variables, this process is an important feature engineering stage before model fitting.
+
+We'll use the `stats` function `prcomp` to apply PCA to our dataset.  Before PCA we need to normalize our variables to "level the playing field" before the algorithm creates linear combinations of the input variables.
+```{r}
+to_pca <- dataset[, !(names(dataset) %in% c("research", "chance_of_admit"))]
+to_pca <- map_df(to_pca, function(x) { (x - mean(x)) / sd(x) })
+
+pca_set <- prcomp(to_pca)
+```
+
+As stated above, each successive variable that comes out of PCA is created to explain as much variance as possible.  To get an idea of exactly how much variance each variable explains, consider the plot below.  The first dimension explains ~42.5\% of the variance, and each of the dimensions explains at least 8\%.  PCA is sometimes used as a method to reduce the number of explanatory variables; in that case we'd look to make a cut in the number of components after the explained variance drops below, say, 2\%.  In our case we are primarily interested in avoiding multicollinearity in our feature set so we will not be dropping any dimensions.
+```{r}
+var_exp <- data.frame(
+  var_explained = 100 * pca_set$sdev / sum(pca_set$sdev),
+  dim_number = 1:length(pca_set$sdev)
+)
+
+ggplot(var_exp, aes(x = dim_number, y = var_explained)) +
+  geom_col() +
+  theme_bw()
+```
+
+To get a sense for how the new variables created by PCA are able to explain variation in the admission chances better than any two of the non-transformed variables, consider the plots below.  The top plot has `cpga` and `gre_score` plotted with`chance_of_admit` colored (these were the two variables most highly correlated with the response); the bottom plot as the first two PCA variables plotted with `chance_of_admit` colored.
+```{r}
+pca_values <- predict(pca_set, newdata = to_pca)
+pca_values <- cbind(pca_values, select(dataset, "chance_of_admit"))
+
+p1 <- ggplot(cbind(to_pca, select(dataset, "chance_of_admit")), aes(x = cgpa, y = toefl_score, color = chance_of_admit)) +
+  geom_point() +
+  theme_bw()
+p2 <- ggplot(pca_values, aes(x = PC1, y = PC2, color = chance_of_admit)) +
+  geom_point() + 
+  theme_bw()
+
+p1 / p2
+```
+
+
+
+
+
+
+
+
+
