@@ -20,11 +20,9 @@ library(DataExplorer)
 library(ggridges)
 library(reshape2)
 library(ggfortify) # for plotting PCA
-library(leaflet)
-library(leaflet.extras)
-library(sqldf)
 library(patchwork)
 library(caret)
+library(recipes)
 library(knitr)
 library(DT)
 
@@ -136,23 +134,27 @@ ggplot(dataset, aes(x = chance_of_admit, fill = factor(research), color = factor
 
 We see that each variable is moderately correlated with each other variable.  In particular, we see that `cpga`, `gre_score`, and `toefl_score` are all highly correlated with one another and that `cpga` is the most highly correlated with `chance_of_admit`.  We'll explore some dimensionality reduction techniques in the next section.
 ```{r}
-cor_matrix <- round(cor(select(dataset, -research)), 2)
-melted_cor_matrix <- melt(cor_matrix)
+get_cor_matrix_plot <- function(df, round_to = 2) {
+  cor_matrix <- round(cor(df), round_to)
+  melted_cor_matrix <- melt(cor_matrix)
+  
+  ggplot(melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) +
+    geom_tile(color = "white") +
+    scale_fill_gradient2(
+      low = "blue", high = "red", mid = "white", 
+      midpoint = 0, limit = c(-1,1), space = "Lab", 
+      name="Pearson\nCorrelation"
+    ) +
+    theme_minimal() + 
+    theme(
+      axis.text.x = element_text(angle = 45, vjust = 1, 
+      size = 12, hjust = 1)
+    ) +
+    coord_fixed() +
+    geom_text(aes(Var1, Var2, label = value), color = "black", size = 4) 
+}
 
-ggplot(melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) +
-  geom_tile(color = "white") +
-  scale_fill_gradient2(
-    low = "blue", high = "red", mid = "white", 
-    midpoint = 0, limit = c(-1,1), space = "Lab", 
-    name="Pearson\nCorrelation"
-  ) +
-  theme_minimal() + 
-  theme(
-    axis.text.x = element_text(angle = 45, vjust = 1, 
-    size = 12, hjust = 1)
-  ) +
-  coord_fixed() +
-  geom_text(aes(Var1, Var2, label = value), color = "black", size = 4) 
+get_cor_matrix_plot(select(dataset, -research))
 ```
 
 ## Dimensionality Reduction
@@ -179,23 +181,136 @@ ggplot(var_exp, aes(x = dim_number, y = var_explained)) +
   theme_bw()
 ```
 
-To get a sense for how the new variables created by PCA are able to explain variation in the admission chances better than any two of the non-transformed variables, consider the plots below.  The top plot has `cpga` and `gre_score` plotted with`chance_of_admit` colored (these were the two variables most highly correlated with the response); the bottom plot as the first two PCA variables plotted with `chance_of_admit` colored.
+To get a sense for how the new variables created by PCA are related to `chance_of_admit`, consider the scatter plots below.  `PC1` and `chance_of_admit` are very clearly negatively correlated.  None of the other components appear to have much of a direct relationship with `chance_of_admit`. This observation is supported by the correlation matrix below.  Our naive model choice is then to simply regress `chance_of_admit` onto `PC1`.  It will be interesting to see if multiple linear regression or a tree based method will offer much improvement.
+
 ```{r}
-pca_values <- predict(pca_set, newdata = to_pca)
-pca_values <- cbind(pca_values, select(dataset, "chance_of_admit"))
+get_scatter_plots <- function(x_name, y_name, dataset) {
+  wrapr::let(
+    alias = list(X_VAR = x_name, Y_VAR = y_name),
+    expr = {
+      ggplot(dataset, aes(x = X_VAR, y = Y_VAR)) +
+        geom_point()
+    }
+  )
+}
 
-p1 <- ggplot(cbind(to_pca, select(dataset, "chance_of_admit")), aes(x = cgpa, y = toefl_score, color = chance_of_admit)) +
-  geom_point() +
-  theme_bw()
-p2 <- ggplot(pca_values, aes(x = PC1, y = PC2, color = chance_of_admit)) +
-  geom_point() + 
-  theme_bw()
+scatter_plots <- lapply(paste0("PC", 1:6), 
+                        get_scatter_plots,
+                        y_name = "chance_of_admit",
+                        dataset = pca_values)
 
-p1 / p2
+patchwork::wrap_plots(scatter_plots, ncol = 2, nrow = 3)
+```
+
+`PC1` is highly correlated with `chance_of_admit` while none of the other components are.
+```{r}
+get_cor_matrix_plot(select(pca_data, -research))
+```
+
+## Continuous Feature distribution
+
+Each of the features extracted by our PCA analysis above is approximately normal, as evidenced by the plots below.  Since one of the assumptions of linear regression is that the explanatory variables should be normally distributed, this encourages us to consider a multiple (or single) linear regression model.
+```{r}
+get_hist_and_normal_plot <- function(dataset, var_name, na.rm = T) {
+  wrapr::let(
+    alias = list(VAR = var_name),
+    expr = {
+      mean <- mean(dataset$VAR, na.rm = na.rm)
+      sd   <- sd(dataset$VAR, na.rm = na.rm)
+      
+      ggplot(dataset, aes(x = VAR)) +
+        stat_function(fun = dnorm, 
+                      n = 100, 
+                      args = list(mean = mean, sd = sd), color = "red")  +
+        labs(title = sprintf("%s vs. Normal Distribution", var_name), y = "") +
+        geom_density() +
+        ggthemes::theme_tufte()
+    }
+  )
+}
+
+plots <- lapply(paste0("PC", 1:6), get_hist_and_normal_plot, dataset = pca_values)
+patchwork::wrap_plots(plots, ncol = 2, nrow = 3)
 ```
 
 
+# Model Fitting
 
+For model fitting, we need to be careful about when we apply PCA.  In the EDA section above, we extracted primary components by analyzing the entire data set.  However, this leaks data about the test set into the training process.  Therefore we need to define our PCA process on the training set alone and later apply it to the test set when we are ready to test the model.  This includes the normalization of the explanatory variables -- to normalize the test set, we will subtract the mean of the training set and divide by the standard deviation of the training set.
+
+## Split into test / train
+
+```{r}
+dataset_with_index <- dataset %>%
+  group_by(university_rating, research) %>%
+  mutate(set = sample(c("train", "test"), size = n(), replace = TRUE, prob = c(0.8, 0.2)))
+
+train <- filter(dataset_with_index, set == "train") %>% 
+  select(-set)
+test  <- filter(dataset_with_index, set == "test") %>% 
+  select(-set)
+```
+
+https://tidymodels.github.io/recipes/reference/step_pca.html
+
+```{r}
+feature_recipe <- recipe(chance_of_admit ~ ., data = train) %>%
+  step_center(-research, -all_outcomes()) %>%
+  step_scale(-research, -all_outcomes()) %>%
+  step_pca(-research, -all_outcomes(), num_comp = 6)
+
+fit_feature_recipe <- prep(feature_recipe, training = train)
+
+train_baked <- bake(fit_feature_recipe, train)
+test_baked  <- bake(fit_feature_recipe, test)
+```
+
+The recipe is prepped within each resample in the same manner that train executes the preProc option. However, since a recipe can do a variety of different operations, there are some potentially complicating factors. The main pitfall is that the recipe can involve the creation and deletion of predictors. There are a number of steps that can reduce the number of predictors, such as the ones for pooling factors into an “other” category, PCA signal extraction, as well as filters for near-zero variance predictors and highly correlated predictors. For this reason, it may be difficult to know how many predictors are available for the full model. Also, this number will likely vary between iterations of resampling.
+```{r}
+ctrl <- rfeControl(functions = lmFuncs,
+                   method = "repeatedcv",
+                   repeats = 5,
+                   verbose = FALSE)
+
+lmProfile <- rfe(form = chance_of_admit ~ ., 
+                 data = train, 
+                 sizes = 1:7, 
+                 rfeControl = ctrl)
+
+predictors(lmProfile)
+
+plot(lmProfile, type = c("g", "o"))
+
+
+lmProfile <- rfe(feature_recipe, 
+                 data = train, 
+                 sizes = 1:7, 
+                 rfeControl = ctrl)
+
+lmProfile
+
+predictors(lmProfile)
+
+plot(lmProfile, type = c("g", "o"))
+```
+
+```{r}
+ctrl_2 <- rfeControl(functions = treebagFuncs,
+                     method = "repeatedcv",
+                     repeats = 5,
+                     verbose = FALSE)
+
+treebagProfile <- rfe(feature_recipe, 
+                      data = train, 
+                      sizes = 1:7, 
+                      rfeControl = ctrl_2)
+
+treebagProfile
+
+predictors(treebagProfile)
+
+plot(treebagProfile, type = c("g", "o"))
+```
 
 
 
