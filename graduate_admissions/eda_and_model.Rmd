@@ -24,25 +24,19 @@ library(patchwork)
 library(caret)
 library(recipes)
 library(knitr)
-library(DT)
+library(kableExtra)
+library(ggthemes)
 
 dataset <- read_csv("Data/Admission_Predict_Ver1.1.csv")
 ```
 
-GRE Scores ( out of 340 )
-TOEFL Scores ( out of 120 )
-University Rating ( out of 5 )
-Statement of Purpose and Letter of Recommendation Strength ( out of 5 )
-Undergraduate GPA ( out of 10 )
-Research Experience ( either 0 or 1 )
-Chance of Admit ( ranging from 0 to 1 )
-
 # Introduction
+
+In this document we consider a set of variables that are potentially related to a student's chances of getting into graduate school.  The population of students is limited to India.  Model interpretability is a top priority as the result should be able to guide students towards the most effective application preparation. 
 
 ## Data source
 
-This data set has nearly 500 observations of 8 different explanatory variables, 6 of which are continuous and 1 of which is binary. 
-***
+This data set has nearly 500 observations of 8 different explanatory variables, 7 of which are continuous and 1 of which is binary. 
 
 # Pre-Modeling Stages
 
@@ -56,7 +50,6 @@ dataset %>%
 ```
 
 The field `Serial No.` appears to be an ID, so we'll drop it.  The columns are renamed to be easier to work with.
-
 ```{r}
 names(dataset) <- str_replace_all(tolower(names(dataset)), " ", "_")
 dataset <- select(dataset, -serial_no.)
@@ -70,6 +63,15 @@ None of the columns contains any missing data:
 map_df(dataset, is.na) %>%
   map_df(sum)
 ```
+The allowed range for each variable is as follows:
+
+* GRE Scores ( out of 340 )
+* TOEFL Scores ( out of 120 )
+* University Rating ( out of 5 )
+* Statement of Purpose and Letter of Recommendation Strength ( out of 5 )
+* Undergraduate GPA ( out of 10 )
+* Research Experience ( either 0 or 1 )
+* Chance of Admit ( ranging from 0 to 1 )
 
 Each variable is within the expected range, so there is no apparent need to clean the data.
 ```{r}
@@ -132,7 +134,7 @@ ggplot(dataset, aes(x = chance_of_admit, fill = factor(research), color = factor
   theme_bw()
 ```
 
-We see that each variable is moderately correlated with each other variable.  In particular, we see that `cpga`, `gre_score`, and `toefl_score` are all highly correlated with one another and that `cpga` is the most highly correlated with `chance_of_admit`.  We'll explore some dimensionality reduction techniques in the next section.
+We see that each variable is moderately correlated with each other variable.  In particular, we see that `cpga`, `gre_score`, and `toefl_score` are all highly correlated with one another and that `cpga` is the most highly correlated with `chance_of_admit`.  High correlation among explanatory variables can decrease model accuracy due to multicollinearity. In the next section we'll explore a dimensionality reduction technique called Primary Component Analysis that builds a new set of uncorrelated explanatory variables.
 ```{r}
 get_cor_matrix_plot <- function(df, round_to = 2) {
   cor_matrix <- round(cor(df), round_to)
@@ -157,9 +159,33 @@ get_cor_matrix_plot <- function(df, round_to = 2) {
 get_cor_matrix_plot(select(dataset, -research))
 ```
 
+Each of the continuous features approximately normal, as evidenced by the plots below.  Since one of the assumptions of linear regression is that the explanatory variables should be normally distributed, this encourages us to consider a multiple (or single) linear regression model.
+```{r}
+get_hist_and_normal_plot <- function(dataset, var_name, na.rm = T) {
+  wrapr::let(
+    alias = list(VAR = var_name),
+    expr = {
+      mean <- mean(dataset$VAR, na.rm = na.rm)
+      sd   <- sd(dataset$VAR, na.rm = na.rm)
+      
+      ggplot(dataset, aes(x = VAR)) +
+        stat_function(fun = dnorm, 
+                      n = 100, 
+                      args = list(mean = mean, sd = sd), color = "red")  +
+        labs(title = sprintf("%s vs. Normal Distribution", var_name), y = "") +
+        geom_density() +
+        theme_tufte()
+    }
+  )
+}
+
+plots <- lapply(c("gre_score", "toefl_score", "sop", "lor", "cgpa"), get_hist_and_normal_plot, dataset = dataset)
+wrap_plots(plots, ncol = 2, nrow = 3)
+```
+
 ## Dimensionality Reduction
 
-Primary Component Analysis (PCA) is a linear algebra technique for combining several correlated variables into a chosen number of uncorrelated variables.  The uncorrelated variables are constructed through linear combinations of the original variables; the uncorrelated variables are successively created to explain as much variance as possible.  Since our dataset has so many highly correlated variables, this process is an important feature engineering stage before model fitting.
+Primary Component Analysis (PCA) is a linear algebra technique for combining several correlated variables into a chosen number of uncorrelated variables.  The uncorrelated variables are constructed through linear combinations of the original variables; the uncorrelated variables are successively created to explain as much variance as possible.  Since our dataset has so many highly correlated variables, this feature engineering process could lead to better test accuracy.  However, an important goal of the end model is interpretability since students will want to know what factors are most important for getting into grad school.  We'll need to keep this in mind when comparing the final PCA-based model with the non-PCA model.
 
 We'll use the `stats` function `prcomp` to apply PCA to our dataset.  Before PCA we need to normalize our variables to "level the playing field" before the algorithm creates linear combinations of the input variables.
 ```{r}
@@ -167,6 +193,7 @@ to_pca <- dataset[, !(names(dataset) %in% c("research", "chance_of_admit"))]
 to_pca <- map_df(to_pca, function(x) { (x - mean(x)) / sd(x) })
 
 pca_set <- prcomp(to_pca)
+pca_values <- cbind(pca_set$x, dataset[, names(dataset) %in% c("research", "chance_of_admit")])
 ```
 
 As stated above, each successive variable that comes out of PCA is created to explain as much variance as possible.  To get an idea of exactly how much variance each variable explains, consider the plot below.  The first dimension explains ~42.5\% of the variance, and each of the dimensions explains at least 8\%.  PCA is sometimes used as a method to reduce the number of explanatory variables; in that case we'd look to make a cut in the number of components after the explained variance drops below, say, 2\%.  In our case we are primarily interested in avoiding multicollinearity in our feature set so we will not be dropping any dimensions.
@@ -199,48 +226,26 @@ scatter_plots <- lapply(paste0("PC", 1:6),
                         y_name = "chance_of_admit",
                         dataset = pca_values)
 
-patchwork::wrap_plots(scatter_plots, ncol = 2, nrow = 3)
+wrap_plots(scatter_plots, ncol = 2, nrow = 3)
 ```
 
 `PC1` is highly correlated with `chance_of_admit` while none of the other components are.
 ```{r}
-get_cor_matrix_plot(select(pca_data, -research))
+get_cor_matrix_plot(select(pca_values, -research))
 ```
 
-## Continuous Feature distribution
-
-Each of the features extracted by our PCA analysis above is approximately normal, as evidenced by the plots below.  Since one of the assumptions of linear regression is that the explanatory variables should be normally distributed, this encourages us to consider a multiple (or single) linear regression model.
+Just as the original continuous features were approximately normal, so are each of the features extracted by our PCA analysis.  Since one of the assumptions of linear regression is that the explanatory variables should be normally distributed, this encourages us to consider a multiple (or single) linear regression model.
 ```{r}
-get_hist_and_normal_plot <- function(dataset, var_name, na.rm = T) {
-  wrapr::let(
-    alias = list(VAR = var_name),
-    expr = {
-      mean <- mean(dataset$VAR, na.rm = na.rm)
-      sd   <- sd(dataset$VAR, na.rm = na.rm)
-      
-      ggplot(dataset, aes(x = VAR)) +
-        stat_function(fun = dnorm, 
-                      n = 100, 
-                      args = list(mean = mean, sd = sd), color = "red")  +
-        labs(title = sprintf("%s vs. Normal Distribution", var_name), y = "") +
-        geom_density() +
-        ggthemes::theme_tufte()
-    }
-  )
-}
-
 plots <- lapply(paste0("PC", 1:6), get_hist_and_normal_plot, dataset = pca_values)
-patchwork::wrap_plots(plots, ncol = 2, nrow = 3)
+wrap_plots(plots, ncol = 2, nrow = 3)
 ```
 
+# Model Building/Evaluation
 
-# Model Fitting
-
-For model fitting, we need to be careful about when we apply PCA.  In the EDA section above, we extracted primary components by analyzing the entire data set.  However, this leaks data about the test set into the training process.  Therefore we need to define our PCA process on the training set alone and later apply it to the test set when we are ready to test the model.  This includes the normalization of the explanatory variables -- to normalize the test set, we will subtract the mean of the training set and divide by the standard deviation of the training set.
-
-## Split into test / train
-
+Split dataset 80/20 into train and test.  Note that some combinations of `university_rating` and `research` have relatively few observations. We group by those variables when splitting the dataset to ensure some observations show up in each.
 ```{r}
+set.seed(541)
+
 dataset_with_index <- dataset %>%
   group_by(university_rating, research) %>%
   mutate(set = sample(c("train", "test"), size = n(), replace = TRUE, prob = c(0.8, 0.2)))
@@ -251,69 +256,180 @@ test  <- filter(dataset_with_index, set == "test") %>%
   select(-set)
 ```
 
-https://tidymodels.github.io/recipes/reference/step_pca.html
+## Model Fitting Part 1: No PCA
 
+### Data Prep Recipe
+
+Create recipe for feature preparation - center and scale (normalize) the variables:
 ```{r}
 feature_recipe <- recipe(chance_of_admit ~ ., data = train) %>%
   step_center(-research, -all_outcomes()) %>%
+  step_scale(-research, -all_outcomes())
+```
+
+### Variable Selection
+
+For variable selection we'll be using backwards feature selection, also known as recursive feature elimination (RFE).  RFE selects features by recursively considering smaller sets of features until only 1 feature remains.  That is, RFE fits a model using $N$ explanatory variables, removes the least significant variable, and then repeats the process with the $N-1$ reamaining variables.  The set of variables used to create the model with the lowest estimated test error is the set used for the final model.  In our case, we'll be estimating the test error using cross-validation.
+
+Based on the discussion above about the normality of the primary components, multiple linear regression is the model we'll be fitting.  RMSE will be used as metric by which to identify the best performing subset of variables.
+```{r}
+set.seed(503)
+
+ctrl <- rfeControl(functions = lmFuncs,
+                   method = "repeatedcv",
+                   repeats = 5,
+                   verbose = FALSE)
+
+lmProfile <- rfe(feature_recipe, 
+                 data = train, 
+                 metric = "RMSE",
+                 rfeControl = ctrl,
+                 sizes = 1:7)
+
+plot(lmProfile, type = c("g", "o"))
+```
+
+The model with the best approximate test RMSE was the model with 6 variables at ~0.0605 RMSE.  However, the model with 5 variables had near identical performance.  
+```{r}
+lmProfile$results %>%
+  filter(Variables %in% c(5, 6)) %>% 
+  select(Variables, RMSE, Rsquared) %>%
+  kable(format = "html") %>%
+  kable_styling()
+```
+
+
+To avoid overfitting, we'll choose the model with 5 variables as the most important.  Those top 5 variables are:
+```{r}
+lmProfile$variables %>% 
+  filter(Variables == 5) %>%
+  distinct(var) %>%
+  kable(format = "html") %>% 
+  kable_styling()
+```
+
+## Model Fitting Part 2: PCA
+
+For model fitting, we need to be careful about when we apply PCA.  In the EDA section above, we extracted primary components by analyzing the entire data set.  However, this leaks data about the test set into the training process.  Therefore we need to define our PCA process on the training set alone and later apply it to the test set when we are ready to test the model.  This includes the normalization of the explanatory variables -- to normalize the test set, we will subtract the mean of the training set and divide by the standard deviation of the training set.
+
+### Data Prep Recipe
+
+Create recipe for feature preparation - center and scale (normalize) the variables used for PCA in the EDA section before applying PCA.  Note that we ask the `step_pca` function to keep all components rather than using an explained variance threshold.  This allows us to do our own variable selection later on.
+```{r}
+feature_recipe_pca <- recipe(chance_of_admit ~ ., data = train) %>%
+  step_center(-research, -all_outcomes()) %>%
   step_scale(-research, -all_outcomes()) %>%
   step_pca(-research, -all_outcomes(), num_comp = 6)
+```
 
+### Variable Selection
+
+For variable selection we'll be using the same method as in Model Fitting Part 1 -- recursive feature elimination with cross-validation.
+```{r}
+set.seed(503)
+
+ctrl <- rfeControl(functions = lmFuncs,
+                   method = "repeatedcv",
+                   repeats = 5,
+                   verbose = FALSE)
+
+lmProfile_pca <- rfe(feature_recipe_pca, 
+                     data = train, 
+                     metric = "RMSE",
+                     rfeControl = ctrl,
+                     sizes = 1:7)
+
+plot(lmProfile_pca, type = c("g", "o"))
+```
+
+The model with the best approximate test RMSE was the model with 6 variables (0.0603).  However, the RMSE of this model is only a 0.16% improvment over the best model from the non-PCA section
+```{r}
+lmProfile_pca$results %>%
+  filter(Variables %in% c(5, 6)) %>% 
+  select(Variables, RMSE, Rsquared) %>%
+  kable(format = "html") %>%
+  kable_styling()
+```
+
+The 6 variables used for the best PCA model were:
+```{r}
+predictors(lmProfile)
+```
+
+## Fitting/Testing Final Model
+
+The best linear regression model based on a subset of the untransformed explanatory variables had a CV RMSE of ~0.0604.  The best model trained on a subset of the PCA variables offered an improvement of only 0.16%.  Since the PCA model offers far less interpretability, we'll go with the non-PCA model for our final model.
+
+First, apply the recipe to the train/test data:
+```{r}
 fit_feature_recipe <- prep(feature_recipe, training = train)
 
 train_baked <- bake(fit_feature_recipe, train)
 test_baked  <- bake(fit_feature_recipe, test)
 ```
 
-The recipe is prepped within each resample in the same manner that train executes the preProc option. However, since a recipe can do a variety of different operations, there are some potentially complicating factors. The main pitfall is that the recipe can involve the creation and deletion of predictors. There are a number of steps that can reduce the number of predictors, such as the ones for pooling factors into an “other” category, PCA signal extraction, as well as filters for near-zero variance predictors and highly correlated predictors. For this reason, it may be difficult to know how many predictors are available for the full model. Also, this number will likely vary between iterations of resampling.
+Next, fit a linear model using the 5 variables selected by RFE:
 ```{r}
-ctrl <- rfeControl(functions = lmFuncs,
-                   method = "repeatedcv",
-                   repeats = 5,
-                   verbose = FALSE)
-
-lmProfile <- rfe(form = chance_of_admit ~ ., 
-                 data = train, 
-                 sizes = 1:7, 
-                 rfeControl = ctrl)
-
-predictors(lmProfile)
-
-plot(lmProfile, type = c("g", "o"))
-
-
-lmProfile <- rfe(feature_recipe, 
-                 data = train, 
-                 sizes = 1:7, 
-                 rfeControl = ctrl)
-
-lmProfile
-
-predictors(lmProfile)
-
-plot(lmProfile, type = c("g", "o"))
+model <- lm(chance_of_admit ~ cgpa + research + gre_score + lor + toefl_score, data = train_baked)
 ```
 
+Lastly, predict `chance_of_admit` on the test set and consider the results:
 ```{r}
-ctrl_2 <- rfeControl(functions = treebagFuncs,
-                     method = "repeatedcv",
-                     repeats = 5,
-                     verbose = FALSE)
+predicted <- predict(model, test_baked)
 
-treebagProfile <- rfe(feature_recipe, 
-                      data = train, 
-                      sizes = 1:7, 
-                      rfeControl = ctrl_2)
-
-treebagProfile
-
-predictors(treebagProfile)
-
-plot(treebagProfile, type = c("g", "o"))
+results <- test_baked %>%
+  mutate(predicted = predicted) %>%
+  mutate(residual = predicted - chance_of_admit)
 ```
 
+The RMSE value for our result is quite low (0.059):
+```{r}
+sqrt(mean(results$residual ^ 2))
+```
 
+And the R^2 value, which measures the percent of variance in the response variable that is captured by the selected model, is quite high (82.6%):
+```{r}
+summary(model)$r.squared
+```
 
+Additionally, each of the predictor variables was statistically significant at an 0.05 confidence level as evidenced by the coefficient p-values:
+```{r}
+summary(model)
+```
 
+Linear regression models should have normally distributed residuals.  The residuals should also have mean zero and by independent and randomly distributed. These assumption are satisfied reasonably well by our model:
+```{r}
+p1 <- get_hist_and_normal_plot(results, "residual")
+p2 <- ggplot(results, aes(x = cgpa, y = residual)) + 
+  geom_point() +
+  geom_abline(slope = 0, intercept = mean(results$residual)) + 
+  theme_tufte() +
+  labs(title = "residuals vs. most important variable (CGPA)")
 
+p1 + p2
+```
+
+## Interpreting Final Model
+
+The most important variable in our final model was College GPA.  It was much more important than any of the other predictors.  Letter of Recommendation was second most important, followed by GRE Score, Research, and TOEFL Score.  This result should be encouraging to students eager to apply to grad school - the most important variable is entirely in their control!
+```{r}
+varImp(model) %>%
+  kable(format = "html") %>%
+  kable_styling()
+```
+
+The coefficients of the model are all positive.  This is very much in line with our expectations - increasing a student's GPA, GRE Score, Letter of Rec Score, or TOEFL score all increases their chance of admission.
+```{r}
+coefficients(model)
+```
+
+# Conclusion
+
+We set out to predict students' chance of admission at universities based on their academic history and application materials.  Many of these explanatory variables turned out to be highly correlated with one another, so primary component analysis was used to create an alternative set of uncorrelated features.  After applying Recursive Feature Elimination to a linear regression model with the original and then uncorrelated features, it became clear the the multicollinearity was not much of a problem.  In order to maintain the interpretability of the final model, the original predictors were used.
+
+The final multiple linear regression model performed quite well with 0.05 MSE, 79% R^2, and apprixately  i.i.d. normal residuals. Also, each predictor was statistically significant at an 0.05 alpha level. The most important predictor turned out to be CGPA followed by Letter of Rec, GRE Score, Research, and TOEFL Score.  Students should be advised to focus on their coursework above all else.  The should, however, attempt to receive a strong letter of recommendation and do well on standardized tests.  It was suprising to see that University Ranking and Statement of Purpose were eliminated as part of RFE -- people would probably tend to place University Ranking as one of the most important factors.
+
+```{r}
+sessionInfo()
+```
 
