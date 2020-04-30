@@ -1,0 +1,88 @@
+---
+title: "How To: Correlation Matrix Plot"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(reshape2)
+```
+
+```{r}
+get_correlation_matrix_plot <- function(df) {
+  
+  df %>%
+    select_if(is.numeric) %>%
+    cor() %>%
+    melt(na.rm = TRUE) %>%
+    mutate(Var1 = as.character(Var1), Var2 = as.character(Var2)) %>%
+    filter(Var1 < Var2) %>%
+    mutate(Var1 = as.factor(Var1), Var2 = as.factor(Var2)) %>%
+    ggplot(aes(x = Var2, y = Var1, fill = value)) +
+      geom_tile(color = "white") +
+      scale_fill_gradient2(
+        low = "blue", high = "red", mid = "white", 
+        midpoint = 0, limit = c(-1,1), space = "Lab", 
+        name="Pearson\nCorrelation"
+      ) +
+      theme_minimal()+ 
+      theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
+      coord_fixed() 
+}
+```
+
+
+Keep only numeric columns:
+```{r}
+iris_num <- iris[1:4]
+```
+
+Get correlation matrix:
+```{r}
+cor_matrix <- cor(iris_num[1:4])
+```
+
+"Melt" the matrix so that each row is an observation of [var_1 | var_2 | cor].
+```{r}
+library(reshape2)
+melted_cormatrix <- melt(cor_matrix, na.rm = TRUE) 
+```
+
+Keep only the "upper triangle" of the diagram:
+```{r}
+upper_tri <- melted_cormatrix %>%
+  mutate(Var1 = as.character(Var1), Var2 = as.character(Var2)) %>%
+  filter(Var1 < Var2) %>%
+  mutate(Var1 = as.factor(Var1), Var2 = as.factor(Var2))
+```
+
+Get a heat map:
+```{r}
+ggplot(data = upper_tri, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white")+
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white", 
+    midpoint = 0, limit = c(-1,1), space = "Lab", 
+    name="Pearson\nCorrelation"
+  ) +
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
+  coord_fixed() 
+```
+
+Filter for only observations with high (> 0.5) correlation:
+```{r}
+upper_tri %>%
+  filter(abs(value) > 0.5) %>%
+  ggplot(data = upper_tri, aes(Var2, Var1, fill = value)) +
+    geom_tile(color = "white")+
+    scale_fill_gradient2(
+      low = "blue", high = "red", mid = "white", 
+      midpoint = 0, limit = c(-1,1), space = "Lab", 
+      name="Pearson\nCorrelation"
+    ) +
+    theme_minimal()+ 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
+    coord_fixed() 
+```
+
