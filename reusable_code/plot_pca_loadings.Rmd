@@ -1,0 +1,43 @@
+---
+title: "How To: PCA Loadings Plot"
+output: html_notebook
+---
+  
+```{r}
+library(tidyverse)
+library(MASS) # for Boston data set
+```
+
+```{r}
+get_pca_loadings_plot <- function(df, pc_a, pc_b, center = TRUE, scale = TRUE) {
+  
+  pca_result <- prcomp(~ ., data = df, center = center, scale = scale)
+  
+  loadings_df <- data.frame(variable = rownames(pca_results$rotation), pca_results$rotation)
+  
+  wrapr::let(
+    alias = list(PCOMP_A = pc_a, PCOMP_B = pc_b),
+    expr = {
+      ggplot(loadings_df) +
+        geom_segment(
+          aes(x = 0, y = 0, xend = PCOMP_A, yend = PCOMP_B), 
+          arrow = arrow(length = unit(1/2, "picas")),
+          color = "black"
+        ) +
+        annotate(
+          "text", 
+          x = loadings_df$PCOMP_A*1.2, y = loadings_df$PCOMP_B*1.2,
+          label = loadings_df$variable
+        ) +
+        labs(x = pc_a, y = pc_b)
+    }
+  )
+}
+
+get_pca_loadings_plot(Boston, "PC1", "PC2")
+```
+
+
+
+
+

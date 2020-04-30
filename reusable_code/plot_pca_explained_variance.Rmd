@@ -1,0 +1,86 @@
+---
+title: "How To: PCA Proportion of Explained Variance"
+output: html_notebook
+---
+
+http://strata.uga.edu/8370/lecturenotes/principalComponents.html
+
+```{r}
+library(tidyverse)
+library(patchwork) # for wrap_plots()
+library(MASS) # for Boston data set
+```
+
+```{r}
+get_pca_variance_plots <- function(df, center = TRUE, scale = TRUE, cum_hline = NULL) {
+  
+  var_proportions <- prcomp(~ ., data = df, center = center, scale = scale) %>%
+    summary() %>%
+    `[[`("importance") %>%
+    t() %>%
+    as.data.frame() %>%
+    mutate(component_number = str_replace(rownames(.), "PC", "")) %>%
+    mutate(component_number = as.numeric(component_number)) %>%
+    rename_all(~tolower(str_replace_all(., "\\s+", "_"))) 
+  
+  scree_plot <- ggplot(var_proportion, aes(x = component_number, y = proportion_of_variance)) +
+    geom_col() +
+    geom_line() +
+    geom_point()
+  
+  cum_prop_plot <- ggplot(var_proportion, aes(x = component_number, y = cumulative_proportion)) +
+    geom_line() +
+    geom_point() + 
+    geom_hline(yintercept = cum_hline)
+  
+  list(scree_plot, cum_prop_plot)
+
+}
+
+get_pca_variance_plots(Boston, cum_hline = 0.9) %>%
+  wrap_plots()
+
+```
+
+
+Apply PCA:
+```{r}
+pca_results <- prcomp(~ ., data = Boston, center = TRUE, scale = TRUE)
+```
+
+Get importance measures:
+```{r}
+importance <- pca_results %>%
+  summary() %>%
+  `[[`("importance") %>%
+  t() %>%
+  as.data.frame()
+```
+
+Make component numbers numeric instead of "PCX"; make column names in_this_form:
+```{r}
+importance_clean <- importance %>% 
+  mutate(component_number = str_replace(rownames(.), "PC", "")) %>%
+  mutate(component_number = as.numeric(component_number)) %>%
+  rename_all(~tolower(str_replace_all(., "\\s+", "_"))) 
+```
+
+A "scree" plot is a bar chart of components and the variance they explain:
+```{r}
+importance_clean %>% 
+  ggplot(aes(x = component_number, y = proportion_of_variance)) +
+  geom_col() +
+  geom_line() + 
+  geom_point()
+```
+
+A plot of cumulative proportion of variance will allow the user to see how many components to keep to explain X amount of variance:
+```{r}
+importance_clean %>% 
+  ggplot(aes(x = component_number, y = cumulative_proportion)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept = 0.9)
+```
+
+
