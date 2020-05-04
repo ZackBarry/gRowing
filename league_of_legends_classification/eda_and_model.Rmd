@@ -44,7 +44,7 @@ The goal of this notebook is to predict the outcome of a game with data from the
 
 We can see that the same variables are available for each the "red" and "blue" team, except `blueWins` records the outcome (there is no `redWins`).
 ```{r}
-dataset %>% head()
+dataset %>% str()
 ```
 
 No columns have missing data.
@@ -174,6 +174,9 @@ vif(vif_model)
 
 ### PCA
 
+Next we seek to reduce the dimension of our predictor space by applying Principal Component Analysis (PCA).  PCA uses linear combinations of possibly correlated input variables to form a new set of variables (principal components) that are uncorrelated with one another.  Additionally, the variables are created sequentially to explain the most variance possible in the dataset.  A variance threshold can be used for dimensionality reduction (e.g. keep only those components that explain more than 5\% of the variance). Note: we center and scale the data before applying PCA since the PCA algorithm uses a distance metric.
+
+In the scree plot below, the magnitude of the eigenvalue indicates the amount of variation that each principal component captures.  The proportion of variance for a given component is the component's eigenvalue divided by the sum of all eigenvalues.  We see that the first component  and second components explain ~35\%  and ~13\% of the variance respectively. Later components are similar in the amount of variance they explain.  The bottom plot shows the cumulative variance explained by the first N components.  One rule of thumb is to keep enough components so that this cumulative variance exceeds 80\%.  In this case, 7 variables appears to be sufficient.
 ```{r}
 pca_results <- prcomp(~ . - gameId - Wins, data = long_df, center = TRUE, scale = TRUE)
 
@@ -185,18 +188,27 @@ var_proportion <- pca_results %>%
   as.data.frame() %>%
   mutate(component_number = str_replace(rownames(.), "PC", "")) %>%
   mutate(component_number = as.numeric(component_number)) %>%
-  rename_all(~tolower(str_replace_all(., "\\s+", "_"))) 
+  rename_all(~tolower(str_replace_all(., "\\s+", "_"))) %>%
+  mutate(eigenvalue = standard_deviation^2)
 
-scree_plot <- ggplot(var_proportion, aes(x = component_number, y = proportion_of_variance)) +
+scree_plot <- ggplot(var_proportion, aes(x = component_number, y = eigenvalue)) +
   geom_col() 
 
-cum_prop_plot <- ggplot(var_proportion, aes(x = component_number, y = cumulative_proportion)) +
-  geom_line()
+prop_plot <- ggplot(var_proportion, aes(x = component_number, y = proportion_of_variance)) +
+  geom_col()
 
-scree_plot + cum_prop_plot
+cum_prop_plot <- ggplot(var_proportion, aes(x = component_number, y = cumulative_proportion)) +
+  geom_line() +
+  geom_hline(yintercept = 0.8)
+
+(scree_plot + prop_plot) / cum_prop_plot
 ```
 
+Next we consider a loading plot which shows how strongly each input variable influences a principal component.  The length of the vector along the PCX axis (i.e. the length of the vector projected to the PCX axis) indicates how much weight that variable has on PCX.  The angles between vectors tell us how the variables are correlated with one another.  If two vectors are close, the variables they represent are positively correlated.  If the angle is closer to 90 degrees, they are not likely to be correlated.  If the angle is close to 180 degress they are negatively correlated.
 
+In this example, the variables that contribute most to `PC1` are `GoldDiff`, `ExperienceDiff`, `AvgLevel` and `TotalExperience`. Not many variables contribute more to `PC2` than to `PC1`, but `Kills`, `Assists`, and `Deaths` contribute significantly.  `PC1` appears to represent high-level team characteristics, while `PC2` represents the biggest KPIs within a game.
+
+We see that `Kills` and `Assists` are strongly correlated with one another.  `Deaths` is negatively correlated with `AvgLevel` and `TotalExperience`.
 ```{r}
 pca_loadings <- data.frame(variable = rownames(pca_results$rotation), pca_results$rotation)
 
@@ -215,7 +227,8 @@ get_loadings_plot <- function(loadings_df, pc_a, pc_b) {
           x = loadings_df$PCOMP_A*1.2, y = loadings_df$PCOMP_B*1.2,
           label = loadings_df$variable
         ) +
-        labs(x = pc_a, y = pc_b)
+        labs(x = pc_a, y = pc_b) +
+        theme_bw()
     }
   )
 }
@@ -223,6 +236,7 @@ get_loadings_plot <- function(loadings_df, pc_a, pc_b) {
 get_loadings_plot(pca_loadings, "PC1", "PC2")
 ```
 
+Finally, we visualize the contribution of each variable to each component with a heat map.  To make it easier to identify contributing variables, those with loading values less than 0.2 are colored as white.
 ```{r}
 pca_loadings %>%
   melt(variable.name = "component") %>% 
