@@ -174,7 +174,7 @@ vif(vif_model)
 
 ### PCA
 
-Next we seek to reduce the dimension of our predictor space by applying Principal Component Analysis (PCA).  PCA uses linear combinations of possibly correlated input variables to form a new set of variables (principal components) that are uncorrelated with one another.  Additionally, the variables are created sequentially to explain the most variance possible in the dataset.  A variance threshold can be used for dimensionality reduction (e.g. keep only those components that explain more than 5\% of the variance). Note: we center and scale the data before applying PCA since the PCA algorithm uses a distance metric.
+Next we seek to reduce the dimension of our predictor space by applying Principal Component Analysis (PCA).  PCA uses linear combinations of possibly correlated input variables to form a new set of variables (principal components) that are uncorrelated with one another.  Additionally, the variables are created sequentially to explain the most variance possible in the dataset.  A variance threshold can be used for dimensionality reduction (e.g. keep only those components that explain more than 5\% of the variance). Note: we center and scale (standardize) the data before applying PCA since variables with larger mean or standard deviation will be prioritized to explain the variation of the data.  
 
 In the scree plot below, the magnitude of the eigenvalue indicates the amount of variation that each principal component captures.  The proportion of variance for a given component is the component's eigenvalue divided by the sum of all eigenvalues.  We see that the first component  and second components explain ~35\%  and ~13\% of the variance respectively. Later components are similar in the amount of variance they explain.  The bottom plot shows the cumulative variance explained by the first N components.  One rule of thumb is to keep enough components so that this cumulative variance exceeds 80\%.  In this case, 7 variables appears to be sufficient.
 ```{r}
@@ -357,28 +357,6 @@ plots <- lapply(top_5_most_correlated, compare_histogram, df = narrow_df)
 wrap_plots(plots)
 ```
 
-### VIF: Another Look at Correlation
-
-```{r}
-long_df <- select(long_df, -c(TotalGold, TotalMinionsKilled))
-
-vif_model <- lm(Wins ~ . - gameId, data = long_df)
-
-vif(vif_model)
-```
-
-```{r}
-alias(vif_model)
-```
-
-```{r}
-long_df <- select(long_df, -EliteMonsters)
-
-vif_model <- lm(Wins ~ . - gameId, data = long_df)
-
-vif(vif_model)
-```
-
 ### PCA
 
 ```{r}
@@ -445,4 +423,354 @@ pca_loadings %>%
     theme_minimal() +
     coord_fixed()
 ```
+
+## Data Wrangling: 1 row per game
+
+## Visualization
+
+### Variable Correlation
+
+Next, we look at a correlation heat map with all variables.  There are too many variables to get a clear sense of what's going on, so we'll break it down in the next couple visualizations.
+```{r}
+cor_mat <- cor(dataset)
+melted_cormat <- melt(cor_mat, na.rm = TRUE) 
+upper_tri <- melted_cormat %>%
+  mutate(Var1 = as.character(Var1), Var2 = as.character(Var2)) %>%
+  filter(Var1 < Var2) %>%
+  mutate(Var1 = as.factor(Var1), Var2 = as.factor(Var2))
+# Heatmap
+ggplot(data = upper_tri, aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white")+
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white", 
+    midpoint = 0, limit = c(-1,1), space = "Lab", 
+    name="Pearson\nCorrelation"
+  ) +
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
+  coord_fixed() 
+```
+
+We consider which variables are highly correlated (cor > 0.5).  We see that `TotalGold` and `TotalExperience` are the variables with the most highly correlated pairs.  This makes sense because they are high-level metrics that are likely influenced by lower level metrics such as `AvgLevel` and `GoldDiff`.
+```{r}
+upper_tri %>%
+  filter(abs(value) > 0.5) %>%
+  ggplot(aes(Var2, Var1, fill = value)) +
+  geom_tile(color = "white")+
+  scale_fill_gradient2(
+    low = "blue", high = "red", mid = "white", 
+    midpoint = 0, limit = c(-1,1), space = "Lab", 
+    name="Pearson\nCorrelation"
+  ) +
+  theme_minimal()+ 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
+  coord_fixed() 
+```
+
+Next, we look to see if any variables are 100\% correlated.  We find that `GoldPerMin` is 100\% correlated with `TotalGold` and `CSPerMin` with `TotalMinionsKilled`.  As such we will drop `TotalGold` and `TotalMinionsKilled` when we prepare for modeling.
+```{r}
+filter(upper_tri, value == 1)
+```
+
+### KPI Performance of Winning vs. Losing Team
+
+Our first in-depth look will be the correlation of each variable with Wins.  We find that gold-related KPIs `GoldDiff`, `ExperienceDiff`, `TotalGold`, and `GoldPerMin` top the list.  Experience KPIs `TotalExperience` and `AvgLevel` are slightly less correlated, as are player vs. player aggression KPIs `Kills`, `Deaths`, and `Assists`. Monster, Minion, and Ward KPIs are the least correlated.  It will be interesting to see if our Primary Component Analysis pulls these groups out.
+```{r}
+as_tibble(cor_mat) %>%
+  mutate(comparedVar = rownames(cor_mat)) %>%
+  select(comparedVar, blueWins) %>%
+  arrange(desc(abs(blueWins)))
+``` 
+
+Taking a look at the distributions of the top 5 variables that are most correlated with `Wins`, we see that each distribution is approximately normal.  Additionally, the distribution for the variable when `Wins` is 0 is generally shifted to the left from when `Wins` is 1.  This is in line with out expectations - it makes sense that the losing team should have less Gold and Experience than the winning team.
+```{r}
+top_5_most_correlated <- c("percdiffGoldPerMin", "percdiffTotalGold", "percdiffTotalExperience", "percdiffKills", "percdiffDeaths")
+
+compare_histogram <- function(df, kpi_name) {
+  
+  wrapr::let(
+    alias = list(KPI_VAR = kpi_name),
+    expr = {
+      ggplot(df, aes(x = KPI_VAR, color = factor(blueWins))) +
+        geom_histogram(position = "identity", alpha = 0.5, fill = "white") +
+        theme_bw()
+    }
+  )
+
+}
+
+plots <- lapply(top_5_most_correlated, compare_histogram, df = dataset) 
+wrap_plots(plots)
+```
+
+### PCA
+
+```{r}
+pca_results <- prcomp(~ . - gameId - blueWins, data = dataset, center = TRUE, scale = TRUE)
+
+# scree plot
+var_proportion <- pca_results %>%
+  summary() %>%
+  `[[`("importance") %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate(component_number = str_replace(rownames(.), "PC", "")) %>%
+  mutate(component_number = as.numeric(component_number)) %>%
+  rename_all(~tolower(str_replace_all(., "\\s+", "_"))) 
+
+scree_plot <- ggplot(var_proportion, aes(x = component_number, y = proportion_of_variance)) +
+  geom_col() 
+
+cum_prop_plot <- ggplot(var_proportion, aes(x = component_number, y = cumulative_proportion)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept = 0.9)
+
+scree_plot + cum_prop_plot
+```
+
+
+```{r}
+pca_loadings <- data.frame(variable = rownames(pca_results$rotation), pca_results$rotation)
+
+get_loadings_plot <- function(loadings_df, pc_a, pc_b) {
+  wrapr::let(
+    alias = list(PCOMP_A = pc_a, PCOMP_B = pc_b),
+    expr = {
+      ggplot(loadings_df) +
+        geom_segment(
+          aes(x = 0, y = 0, xend = PCOMP_A, yend = PCOMP_B), 
+          arrow = arrow(length = unit(1/2, "picas")),
+          color = "black"
+        ) +
+        annotate(
+          "text", 
+          x = loadings_df$PCOMP_A*1.2, y = loadings_df$PCOMP_B*1.2,
+          label = loadings_df$variable
+        ) +
+        labs(x = pc_a, y = pc_b)
+    }
+  )
+}
+
+get_loadings_plot(pca_loadings, "PC1", "PC2")
+```
+
+```{r}
+pca_loadings %>%
+  melt(variable.name = "component") %>% 
+  ggplot(aes(x = component, y = variable, fill = abs(value))) +
+    geom_tile(color = "white") +
+    scale_fill_gradient2(
+        low = "white", high = "green", mid = "white",
+        midpoint = 0.2, limit = c(0, 1), space = "Lab",
+        name = "Loading Value"
+    ) +
+    theme_minimal() +
+    coord_fixed()
+```
+
+
+## Model fitting
+
+```{r}
+# mlr3 classification task needs target to be a factor
+dataset <- mutate(dataset, blueWins = as.factor(blueWins))
+
+train <- sample_frac(dataset, 0.9)
+test <- anti_join(dataset, train)
+```
+
+### mlr3 Walkthrough: Decision Tree
+
+To determine a baseline for model performance, we first estimate the classification accuracy for a decision tree by using cross validation.  This also gives us the opportunity to walk through the ml3 modeling process in detail.  In mlr3 applying cross-validation requires three objects - (1) a `learner` containing the model to be trained; (2) a `task` containing the data to be resampled from; (3) a `resampling` that defines the sampling method.  
+
+#### Task
+
+A Task wraps a DataBackend which provides a layer of abstraction for various data storage systems (e.g. DataFrames).  mlr3 comes with a data.table implementation for backends; the conversion from DataFrame to data.table is done automatically.  Instead of working directly with DataBackends, they are worked with indirectly through the Task they are associated with.  Tasks also store information about the role of individual columns of the DataBackend (e.g. target vs. feature).
+```{r}
+task = TaskClassif$new("wins_classifier", backend = train, target = "blueWins", positive = "1")
+task
+```
+
+Deselect linearly dependent variables determined by EDA above - this is done in-place and "provides a different 'view' on the data without altering the data itself".
+```{r}
+task$select(cols = setdiff(task$feature_names, c("blueTotalGold", "blueTotalMinionsKilled", "redKills", "redTotalGold", "redTotalMinionsKilled")))
+```
+
+#### Resampling
+
+See the different resampling implementations:
+```{r}
+as.data.table(mlr_resamplings)  %>%
+  unnest_wider(params, names_sep = "")
+```
+
+The verbose way to do this is to retrieve the specific Resampling object, set the hyperparameters, and attach it to a task in 3 separate steps:
+```{r}
+my_cv = mlr_resamplings$get("cv")
+my_cv$param_set$values <- list(folds = 5)
+my_cv$instantiate(task)
+my_cv
+```
+An easier way is to use `rsmp` to retrieve the object and set hyperparameters in one go:
+```{r}
+my_cv <- rsmp("cv", folds = 5)$instantiate(task)
+my_cv
+```
+
+#### Learner
+
+See the different built-in learners:
+```{r}
+as.data.table(mlr_learners)  %>%
+  filter(str_detect(key, "classif"))
+```
+
+Attach additional learners with `mlr3learners` package:
+```{r}
+library(mlr3learners)
+as.data.table(mlr_learners)  %>%
+  filter(str_detect(key, "classif"))
+```
+
+As with resampling methods, there is a verbose way and a concise way to get a learner:
+```{r}
+my_learner = mlr_learners$get("classif.rpart")
+my_learner
+```
+
+The concise way:
+```{r}
+my_learner = lrn("classif.rpart")
+my_learner
+```
+
+#### Apply Cross Validation
+
+A call to `resample` returnes a `ResampleResult` object that can be used to access different models and metrics from the CV runs.
+```{r}
+my_resample <- resample(task = task, learner = my_learner, resampling = my_cv, store_models = TRUE)
+my_resample
+```
+
+#### Retrieve Performance Metrics
+
+We can aggregate model-specific metrics user `Measure` objects. Here is a list of different built-in measures:
+```{r}
+as.data.table(mlr_measures) %>%
+  filter(task_type == "classif")
+```
+
+To calculate a given measure for each CV model, we first create a measure:
+```{r}
+my_measure <- mlr_measures$get("classif.acc")
+my_measure
+```
+
+And next we pass the measure to the `score()` method attached to our resampling object:
+```{r}
+my_resample$score(my_measure) %>%
+  select(iteration, classif.acc)
+```
+
+We can also do this in a more concise way using the `msr()` function:
+```{r}
+my_resample$score(msr("classif.acc")) %>%
+  select(iteration, classif.acc)
+```
+
+Instead of using `score()`, we can use `aggregate()` to get a summary statistic across all models:
+```{r}
+my_resample$aggregate(msr("classif.acc"))
+```
+
+And we can also pass multiple statistics:
+```{r}
+my_resample$aggregate(msrs(c("classif.acc", "classif.recall")))
+```
+
+### mlr3
+
+
+```{r}
+task = TaskClassif$new("wins_classifier", backend = train, target = "blueWins", positive = "1")
+
+task$select(cols = setdiff(task$feature_names, c("blueTotalGold", "blueTotalMinionsKilled", "redKills", "redTotalGold", "redTotalMinionsKilled")))
+```
+?mlr_pipeops_pca
+```{r}
+blue_cols <- po("select", id = "blue_cols")
+blue_cols$param_set$values$selector <- selector_grep("blue")
+
+blue_pca <- po("pca", id = "blue_pca")
+blue_pca$param_set$values <- list(center = TRUE, scale. = TRUE)
+
+blue_pca_entire <- po("select", id = "blue_cols", param_vals = list(selector = selector_grep("blue"))) %>>%
+  po("pca", id = "blue_pca", param_vals = list(center = TRUE, scale. = TRUE))
+
+
+```
+
+```{r}
+pca_entire <- po("select", id = "blue_cols", param_vals = list(selector = selector_grep("blue"))) %>>%
+  po("pca", id = "blue_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
+  po("select", id = "red_cols", param_vals = list(selector = selector_grep("red"))) %>>%
+  po("pca", id = "red_pca", param_vals = list(center = TRUE, scale. = TRUE)) 
+```
+
+
+```{r}
+pca_blue <- po("select", id = "blue_cols", param_vals = list(selector = selector_grep("blue"))) %>>%
+  po("pca", id = "blue_pca", param_vals = list(center = TRUE, scale. = TRUE))
+
+pca_red <- po("select", id = "red_cols", param_vals = list(selector = selector_grep("red"))) %>>%
+  po("pca", id = "red_pca", param_vals = list(center = TRUE, scale. = TRUE)) 
+
+gunion(list(pca_blue, pca_red)) %>>%
+  po("featureunion") -> graph
+
+graph$keep_results <- TRUE
+
+graph$plot(html = TRUE)
+```
+
+```{r}
+trained <- graph$train(task)
+
+trained$
+```
+
+
+```{r}
+library(mlr3)
+library(mlr3pipelines)
+library(dplyr)
+
+toy_df <- data.frame(
+    homeWins = c(1, 0, 1, 0),
+    homeHits = c(13,10,12,11),
+    homeHomeRuns = c(0,2,0,0),
+    awayHits = c(10,11,14,8),
+    awayHomeRuns = c(1,0,1,1)
+) %>%
+  mutate(homeWins = as.factor(homeWins))
+
+task = TaskClassif$new("toy_task", backend = toy_df, target = "homeWins", positive = "1")
+
+pca_home = po("select", id = "home_cols", param_vals = list(selector = selector_grep("home"))) %>>%
+  po("pca", id = "home_pca", param_vals = list(center = TRUE, scale. = TRUE))
+
+pca_away = po("select", id = "away_cols", param_vals = list(selector = selector_grep("away"))) %>>%
+  po("pca", id = "away_pca", param_vals = list(center = TRUE, scale. = TRUE))
+
+graph <- gunion(list(pca_home, pca_away)) %>>%
+  po("featureunion", id = "all_together") 
+
+graph$keep_results <- TRUE
+
+graph$train(task)
+```
+
+
 
