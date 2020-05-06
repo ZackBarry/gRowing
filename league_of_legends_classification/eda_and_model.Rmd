@@ -694,11 +694,34 @@ my_resample$aggregate(msrs(c("classif.acc", "classif.recall")))
 
 
 ```{r}
-task = TaskClassif$new("wins_classifier", backend = train, target = "blueWins", positive = "1")
+taskTrain = TaskClassif$new("wins_classifier", backend = train, target = "blueWins", positive = "1")
 
-task$select(cols = setdiff(task$feature_names, c("blueTotalGold", "blueTotalMinionsKilled", "redKills", "redTotalGold", "redTotalMinionsKilled")))
+taskTrain$select(cols = setdiff(taskTrain$feature_names, c("blueTotalGold", "blueTotalMinionsKilled", "redKills", "redTotalGold", "redTotalMinionsKilled")))
 ```
-?mlr_pipeops_pca
+
+```{r}
+PipeOpPrepend = R6::R6Class("PipeOpPrepend",
+  inherit = mlr3pipelines::PipeOpTaskPreprocSimple,
+  public = list(
+    initialize = function(id = "prepend", param_vals = list()) {
+      ps = ParamSet$new(params = list(ParamUty$new("prefix", default = "", tags = "prefix")))
+      super$initialize(id, param_set = ps, param_vals = param_vals)
+    },
+    
+    get_state = function(task) {
+      old_names = task$feature_names
+      new_names = paste0(self$param_set$get_values(tags = "prefix"), old_names)
+      list(old_names = old_names, new_names = new_names)
+    },
+
+    transform = function(task) {
+      task$rename(self$state$old_names, self$state$new_names)
+    }
+  )
+)
+```
+
+
 ```{r}
 blue_cols <- po("select", id = "blue_cols")
 blue_cols$param_set$values$selector <- selector_grep("blue")
@@ -715,20 +738,25 @@ blue_pca_entire <- po("select", id = "blue_cols", param_vals = list(selector = s
 ```{r}
 pca_entire <- po("select", id = "blue_cols", param_vals = list(selector = selector_grep("blue"))) %>>%
   po("pca", id = "blue_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
+  PipeOpPrepend$new(id = "blue_pca_rename", param_vals = list(prefix = "blue_")) %>>%
   po("select", id = "red_cols", param_vals = list(selector = selector_grep("red"))) %>>%
-  po("pca", id = "red_pca", param_vals = list(center = TRUE, scale. = TRUE)) 
+  po("pca", id = "red_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
+  PipeOpPrepend$new(id = "red_pca_rename", param_vals = list(prefix = "red_"))
 ```
 
 
 ```{r}
 pca_blue <- po("select", id = "blue_cols", param_vals = list(selector = selector_grep("blue"))) %>>%
-  po("pca", id = "blue_pca", param_vals = list(center = TRUE, scale. = TRUE))
+  po("pca", id = "blue_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
+  PipeOpPrepend$new(id = "blue_pca_rename", param_vals = list(prefix = "blue_"))
 
 pca_red <- po("select", id = "red_cols", param_vals = list(selector = selector_grep("red"))) %>>%
-  po("pca", id = "red_pca", param_vals = list(center = TRUE, scale. = TRUE)) 
+  po("pca", id = "red_pca", param_vals = list(center = TRUE, scale. = TRUE))  %>>%
+  PipeOpPrepend$new(id = "red_pca_rename", param_vals = list(prefix = "red_"))
 
-gunion(list(pca_blue, pca_red)) %>>%
-  po("featureunion") -> graph
+graph <- gunion(list(pca_blue, pca_red)) %>>%
+  po("featureunion") %>>%
+  PipeOpLearner$new(lrn("classif.rpart", predict_type = "response"))
 
 graph$keep_results <- TRUE
 
@@ -736,16 +764,73 @@ graph$plot(html = TRUE)
 ```
 
 ```{r}
-trained <- graph$train(task)
+graph_learner = GraphLearner$new(graph)
 
-trained$
+cv5 = rsmp("cv", folds = 5)
+result <- resample(taskTrain, graph_learner, cv5)
+
+result$aggregate(msrs(c("classif.acc", "classif.recall", "classif.sensitivity")))
+```
+
+```{r}
+library(mlr3tuning)
+
+tune_ps = ParamSet$new(list(
+  ParamInt$new("blue_pca.rank.", lower = 1, upper = 12),
+  ParamInt$new("red_pca.rank.", lower = 1, upper = 12)
+))
+
+tune_ps = ParamSet$new(list(
+  ParamInt$new("classif.rpart.minbucket", lower = 1, upper = 12)
+))
+
+term_spec = term("evals", n_evals = 20)
+
+instance = TuningInstance$new(
+  task = taskTrain,
+  learner = graph_learner,
+  resampling = cv5,
+  measures = msr("classif.acc"),
+  param_set = tune_ps,
+  terminator = term_spec
+)
+
+instance
+```
+
+
+```{r}
+tuner = tnr("grid_search", resolution = 10)
+
+result = tuner$tune(instance)
 ```
 
 
 ```{r}
 library(mlr3)
 library(mlr3pipelines)
+library(paradox)
 library(dplyr)
+
+PipeOpPrepend = R6::R6Class("PipeOpPrepend",
+  inherit = mlr3pipelines::PipeOpTaskPreprocSimple,
+  public = list(
+    initialize = function(id = "prepend", param_vals = list()) {
+      ps = ParamSet$new(params = list(ParamUty$new("prefix", default = "", tags = "prefix")))
+      super$initialize(id, param_set = ps, param_vals = param_vals)
+    },
+    
+    get_state = function(task) {
+      old_names = task$feature_names
+      new_names = paste0(self$param_set$get_values(tags = "prefix"), old_names)
+      list(old_names = old_names, new_names = new_names)
+    },
+
+    transform = function(task) {
+      task$rename(self$state$old_names, self$state$new_names)
+    }
+  )
+)
 
 toy_df <- data.frame(
     homeWins = c(1, 0, 1, 0),
@@ -759,18 +844,96 @@ toy_df <- data.frame(
 task = TaskClassif$new("toy_task", backend = toy_df, target = "homeWins", positive = "1")
 
 pca_home = po("select", id = "home_cols", param_vals = list(selector = selector_grep("home"))) %>>%
-  po("pca", id = "home_pca", param_vals = list(center = TRUE, scale. = TRUE))
+  po("pca", id = "home_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
+  PipeOpPrepend$new(id = "home_rename", param_vals = list(prefix = "home_"))
 
 pca_away = po("select", id = "away_cols", param_vals = list(selector = selector_grep("away"))) %>>%
-  po("pca", id = "away_pca", param_vals = list(center = TRUE, scale. = TRUE))
+  po("pca", id = "away_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
+  PipeOpPrepend$new(id = "away_rename", param_vals = list(prefix = "away_"))
 
 graph <- gunion(list(pca_home, pca_away)) %>>%
   po("featureunion", id = "all_together") 
 
-graph$keep_results <- TRUE
-
 graph$train(task)
 ```
+
+
+```{r}
+PipeOpPrepend = R6::R6Class("PipeOpPrepend",
+  inherit = mlr3pipelines::PipeOpTaskPreproc,
+  public = list(
+    initialize = function(id = "prepend", param_vals = list()) {
+      ps = ParamSet$new(params = list(ParamUty$new("prefix", default = "", tags = "prefix")))
+      super$initialize(id, param_set = ps, param_vals = param_vals)
+    },
+
+    train_task = function(task) {
+      self$state = list()
+      task$rename(task$feature_names, paste0(self$param_set$get_values(tags = "prefix"), task$feature_names))
+    },
+
+    predict_task = function(task) {
+      task$rename(task$feature_names, paste0(self$param_set$get_values(tags = "prefix"), task$feature_names))
+    }
+  )
+)
+```
+```{r}
+# Sepal.Length = 35; Sepal.Width = 23; Petal.Length = 43; Petal.Width = 22
+# 42L results in 44 bins
+
+task = mlr_tasks$get("iris")
+# 42 breaks --> 44 groups; each field has <= 43 distinct values
+op = PipeOpHistBin$new(param_vals = list(breaks = 42L))
+expect_pipeop(op)
+result = op$train(list(task))
+expect_task(result[[1L]])
+
+d = apply(result[[1L]]$data(cols = result[[1L]]$feature_names), MARGIN = 2L,
+          function(x) expect_lt(length(unique(x)), 44L))
+
+op2 = PipeOpHistBin$new(param_vals = list(breaks = 7L))
+result2 = op2$train(list(task))
+
+e = mapply(function(x, y) expect_lte(length(unique(x)), length(unique(y))),
+           x = result2[[1L]]$data(cols = result2[[1L]]$feature_names),
+           y = result[[1L]]$data(cols = result[[1L]]$feature_names))
+
+```
+bins = sapply(result[[1L]]$data(), FUN = levels)[2:5]
+```{r}
+test_that("PipeOpHistBin - not all bins present", {
+  task1 = mlr_tasks$get("iris")
+  dat = iris
+  dat$Sepal.Width[[1L]] = 2.13
+  task2 = TaskClassif$new("iris2", backend = dat, target = "Species")
+  
+  op = PipeOpHistBin$new(param_vals = list(breaks = seq(0, 10, by = 0.05)))
+  expect_pipeop(op)
+  
+  # task1 does not have a Sepal.Width value within the interval (2.10, 2.15]
+  bin_to_check = cut(c(2.10, 2.2), 2)[1] # (2.10, 2.15]
+  
+  result1 = op$train(list(task1))
+  expect_false(bin_to_check %in% result1[[1L]]$data()$Sepal.Width)
+  
+  result2 = op$predict(list(task2))
+  expect_true(bin_to_check %in% result2[[1L]]$data()$Sepal.Width)
+  
+  result3 = op$train(list(task2))
+  expect_equal(result2[[1L]]$data(), result3[[1L]]$data())
+})
+```
+
+
+
+
+
+
+
+
+
+
 
 
 
