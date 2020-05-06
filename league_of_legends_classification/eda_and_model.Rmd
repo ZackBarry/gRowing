@@ -692,12 +692,21 @@ my_resample$aggregate(msrs(c("classif.acc", "classif.recall")))
 
 ### mlr3
 
+The plan for this model is to apply PCA to the red and blue columns separately, join the results, and fit a model.  We'll try multiple different models including classification decision tree, random forest, support vector machine, and xgboost.  To accomplish this, we'll use mlr3pipelines.  A custom function will be needed to rejoin the split PCA results since there is not an operator for renaming variables within a pipeline.  [This section](https://mlr3book.mlr-org.com/extending-pipeops.html) of the mlr3 book provides examples of customer operators.
 
+#### Test/Train Split
+We set up two different tasks for training and testing, deselecting linearly dependent columns:
 ```{r}
-taskTrain = TaskClassif$new("wins_classifier", backend = train, target = "blueWins", positive = "1")
+taskTrain = TaskClassif$new("train", backend = train, target = "blueWins", positive = "1")
 
 taskTrain$select(cols = setdiff(taskTrain$feature_names, c("blueTotalGold", "blueTotalMinionsKilled", "redKills", "redTotalGold", "redTotalMinionsKilled")))
+
+taskTest = TaskClassif$new("test", backend = test, target = "blueWins", positive = "1")
+
+taskTrain$select(cols = setdiff(taskTest$feature_names, c("blueTotalGold", "blueTotalMinionsKilled", "redKills", "redTotalGold", "redTotalMinionsKilled")))
 ```
+
+#### Custom Operator
 
 ```{r}
 PipeOpPrepend = R6::R6Class("PipeOpPrepend",
@@ -721,29 +730,7 @@ PipeOpPrepend = R6::R6Class("PipeOpPrepend",
 )
 ```
 
-
-```{r}
-blue_cols <- po("select", id = "blue_cols")
-blue_cols$param_set$values$selector <- selector_grep("blue")
-
-blue_pca <- po("pca", id = "blue_pca")
-blue_pca$param_set$values <- list(center = TRUE, scale. = TRUE)
-
-blue_pca_entire <- po("select", id = "blue_cols", param_vals = list(selector = selector_grep("blue"))) %>>%
-  po("pca", id = "blue_pca", param_vals = list(center = TRUE, scale. = TRUE))
-
-
-```
-
-```{r}
-pca_entire <- po("select", id = "blue_cols", param_vals = list(selector = selector_grep("blue"))) %>>%
-  po("pca", id = "blue_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
-  PipeOpPrepend$new(id = "blue_pca_rename", param_vals = list(prefix = "blue_")) %>>%
-  po("select", id = "red_cols", param_vals = list(selector = selector_grep("red"))) %>>%
-  po("pca", id = "red_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
-  PipeOpPrepend$new(id = "red_pca_rename", param_vals = list(prefix = "red_"))
-```
-
+#### Define Graph
 
 ```{r}
 pca_blue <- po("select", id = "blue_cols", param_vals = list(selector = selector_grep("blue"))) %>>%
@@ -755,33 +742,71 @@ pca_red <- po("select", id = "red_cols", param_vals = list(selector = selector_g
   PipeOpPrepend$new(id = "red_pca_rename", param_vals = list(prefix = "red_"))
 
 graph <- gunion(list(pca_blue, pca_red)) %>>%
-  po("featureunion") %>>%
-  PipeOpLearner$new(lrn("classif.rpart", predict_type = "response"))
+  po("featureunion")
 
 graph$keep_results <- TRUE
 
 graph$plot(html = TRUE)
 ```
 
+#### Performance Baseline
+
 ```{r}
-graph_learner = GraphLearner$new(graph)
+cart_graph <- graph %>>%
+  PipeOpLearner$new(lrn("classif.rpart", predict_type = "response"))
+
+cart_learner = GraphLearner$new(cart_graph)
 
 cv5 = rsmp("cv", folds = 5)
-result <- resample(taskTrain, graph_learner, cv5)
+result <- resample(taskTrain, cart_learner, cv5)
 
 result$aggregate(msrs(c("classif.acc", "classif.recall", "classif.sensitivity")))
 ```
+
+#### No Tuning
+
+```{r}
+rf_lrn <- mlr_pipeops$get("learner", learner = mlr_learners$get("classif.ranger"))
+rf_lrn <- PipeOpLearner$new(lrn("classif.ranger"))
+rf_lrn <- po("learner", lrn("classif.ranger"))
+
+svm_lrn <- po("learner", lrn("classif.svm"))
+xgb_lrn <- po("learner", lrn("classif.xgboost"))
+
+models <- gunion(list(rf_lrn, svm_lrn, xgb_lrn))
+
+many_graph <- graph %>>%
+  models %>>%
+  PipeOpUnbranch$new(c("rf_lrn", "svm_lrn", "xgb_lrn"), id = "model_branch")
+
+many_graph$plot(html = TRUE)
+```
+
+```{r}
+many_learner = GraphLearner$new(many_graph)
+
+many_learner$predict_type <- "prob"
+
+result <- resample(taskTrain, many_learner, cv5)
+
+ps <- ParamSet$new(list(
+  ParamFct$new("model_branch.selection", levels = lrn_names)
+))
+```
+
 
 ```{r}
 library(mlr3tuning)
 
 tune_ps = ParamSet$new(list(
-  ParamInt$new("blue_pca.rank.", lower = 1, upper = 12),
-  ParamInt$new("red_pca.rank.", lower = 1, upper = 12)
+  ParamInt$new("blue_pca.rank.", lower = 1, upper = 7),
+  ParamInt$new("red_pca.rank.", lower = 1, upper = 7),
+  ParamDbl$new("classif.rpart.cp", lower = 0.001, upper = 0.1),
+  ParamInt$new("classif.rpart.minbucket", lower = 5, upper = 40)
 ))
 
 tune_ps = ParamSet$new(list(
-  ParamInt$new("classif.rpart.minbucket", lower = 1, upper = 12)
+  ParamDbl$new("classif.rpart.cp", lower = 0.001, upper = 0.1)
 ))
 
 term_spec = term("evals", n_evals = 20)
@@ -801,8 +826,13 @@ instance
 
 ```{r}
 tuner = tnr("grid_search", resolution = 10)
+tuner = tnr("random_search")
 
 result = tuner$tune(instance)
+
+tbl <- instance$archive(unnest = "params")[, c("blue_pca.rank.", "red_pca.rank.", 
+                                        "classif.rpart.cp", "classif.rpart.minbucket",
+                                        "classif.acc")]
 ```
 
 
