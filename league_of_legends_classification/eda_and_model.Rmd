@@ -18,9 +18,6 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(DataExplorer)
 library(ggpubr)
-library(leaflet)
-library(leaflet.extras)
-library(sqldf)
 library(patchwork)
 library(caret)
 library(knitr)
@@ -28,6 +25,12 @@ library(DT)
 library(summarytools)
 library(purrr)
 library(car) # for vif()
+library(mlr3)
+library(mlr3learners)
+library(mlr3measures)
+library(mlr3tuning)
+library(mlr3pipelines)
+library(paradox) # ParamSet specifications for mlr3 tuning
 
 dataset <- read_csv("Data/high_diamond_ranked_10min.csv")
 ```
@@ -251,339 +254,23 @@ pca_loadings %>%
     coord_fixed()
 ```
 
-## Data Wrangling: 1 row per game
-
-```{r}
-comparable_cols <- colnames(dataset)[str_detect(colnames(dataset), "red")]
-comparable_cols <- str_replace(comparable_cols, "red", "")
-comparable_cols <- setdiff(comparable_cols, c("ExperienceDiff", "GoldDiff"))
-
-narrow_df <- dataset
-
-for (col in comparable_cols) {
-  
-  wrapr::let(
-    alias = list(B_VAR = paste0("blue", col), R_VAR = paste0("red", col), D_VAR = paste0("percdiff", col)),
-    expr = {
-      narrow_df <- narrow_df %>%
-        mutate(D_VAR = ifelse(B_VAR == 0 & R_VAR == 0, 0,
-                              100 * 2 * (B_VAR - R_VAR) / (B_VAR + R_VAR))
-        )
-    }
-  )
-  
-}
-
-narrow_df <- cbind(
-    select(narrow_df, "gameId", "blueWins"),
-    select_at(narrow_df, vars(contains("percdiff")))
-  )
-```
-
-## Visualization
-
-### Variable Correlation
-
-Next, we look at a correlation heat map with all variables.  There are too many variables to get a clear sense of what's going on, so we'll break it down in the next couple visualizations.
-```{r}
-cor_mat <- cor(narrow_df)
-melted_cormat <- melt(cor_mat, na.rm = TRUE) 
-upper_tri <- melted_cormat %>%
-  mutate(Var1 = as.character(Var1), Var2 = as.character(Var2)) %>%
-  filter(Var1 < Var2) %>%
-  mutate(Var1 = as.factor(Var1), Var2 = as.factor(Var2))
-# Heatmap
-ggplot(data = upper_tri, aes(Var2, Var1, fill = value)) +
-  geom_tile(color = "white")+
-  scale_fill_gradient2(
-    low = "blue", high = "red", mid = "white", 
-    midpoint = 0, limit = c(-1,1), space = "Lab", 
-    name="Pearson\nCorrelation"
-  ) +
-  theme_minimal()+ 
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
-  coord_fixed() 
-```
-
-We consider which variables are highly correlated (cor > 0.5).  We see that `TotalGold` and `TotalExperience` are the variables with the most highly correlated pairs.  This makes sense because they are high-level metrics that are likely influenced by lower level metrics such as `AvgLevel` and `GoldDiff`.
-```{r}
-upper_tri %>%
-  filter(abs(value) > 0.5) %>%
-  ggplot(aes(Var2, Var1, fill = value)) +
-  geom_tile(color = "white")+
-  scale_fill_gradient2(
-    low = "blue", high = "red", mid = "white", 
-    midpoint = 0, limit = c(-1,1), space = "Lab", 
-    name="Pearson\nCorrelation"
-  ) +
-  theme_minimal()+ 
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
-  coord_fixed() 
-```
-
-Next, we look to see if any variables are 100\% correlated.  We find that `GoldPerMin` is 100\% correlated with `TotalGold` and `CSPerMin` with `TotalMinionsKilled`.  As such we will drop `TotalGold` and `TotalMinionsKilled` when we prepare for modeling.
-```{r}
-filter(upper_tri, value == 1)
-```
-
-### KPI Performance of Winning vs. Losing Team
-
-Our first in-depth look will be the correlation of each variable with Wins.  We find that gold-related KPIs `GoldDiff`, `ExperienceDiff`, `TotalGold`, and `GoldPerMin` top the list.  Experience KPIs `TotalExperience` and `AvgLevel` are slightly less correlated, as are player vs. player aggression KPIs `Kills`, `Deaths`, and `Assists`. Monster, Minion, and Ward KPIs are the least correlated.  It will be interesting to see if our Primary Component Analysis pulls these groups out.
-```{r}
-as_tibble(cor_mat) %>%
-  mutate(comparedVar = rownames(cor_mat)) %>%
-  select(comparedVar, blueWins) %>%
-  arrange(desc(abs(blueWins)))
-``` 
-
-Taking a look at the distributions of the top 5 variables that are most correlated with `Wins`, we see that each distribution is approximately normal.  Additionally, the distribution for the variable when `Wins` is 0 is generally shifted to the left from when `Wins` is 1.  This is in line with out expectations - it makes sense that the losing team should have less Gold and Experience than the winning team.
-```{r}
-top_5_most_correlated <- c("percdiffGoldPerMin", "percdiffTotalGold", "percdiffTotalExperience", "percdiffKills", "percdiffDeaths")
-
-compare_histogram <- function(df, kpi_name) {
-  
-  wrapr::let(
-    alias = list(KPI_VAR = kpi_name),
-    expr = {
-      ggplot(df, aes(x = KPI_VAR, color = factor(blueWins))) +
-        geom_histogram(position = "identity", alpha = 0.5, fill = "white") +
-        theme_bw()
-    }
-  )
-
-}
-
-plots <- lapply(top_5_most_correlated, compare_histogram, df = narrow_df) 
-wrap_plots(plots)
-```
-
-### PCA
-
-```{r}
-pca_results <- prcomp(~ . - gameId - blueWins, data = narrow_df, center = TRUE, scale = TRUE)
-
-# scree plot
-var_proportion <- pca_results %>%
-  summary() %>%
-  `[[`("importance") %>%
-  t() %>%
-  as.data.frame() %>%
-  mutate(component_number = str_replace(rownames(.), "PC", "")) %>%
-  mutate(component_number = as.numeric(component_number)) %>%
-  rename_all(~tolower(str_replace_all(., "\\s+", "_"))) 
-
-scree_plot <- ggplot(var_proportion, aes(x = component_number, y = proportion_of_variance)) +
-  geom_col() 
-
-cum_prop_plot <- ggplot(var_proportion, aes(x = component_number, y = cumulative_proportion)) +
-  geom_line() +
-  geom_point() +
-  geom_hline(yintercept = 0.9)
-
-scree_plot + cum_prop_plot
-```
-
-
-```{r}
-pca_loadings <- data.frame(variable = rownames(pca_results$rotation), pca_results$rotation)
-
-get_loadings_plot <- function(loadings_df, pc_a, pc_b) {
-  wrapr::let(
-    alias = list(PCOMP_A = pc_a, PCOMP_B = pc_b),
-    expr = {
-      ggplot(loadings_df) +
-        geom_segment(
-          aes(x = 0, y = 0, xend = PCOMP_A, yend = PCOMP_B), 
-          arrow = arrow(length = unit(1/2, "picas")),
-          color = "black"
-        ) +
-        annotate(
-          "text", 
-          x = loadings_df$PCOMP_A*1.2, y = loadings_df$PCOMP_B*1.2,
-          label = loadings_df$variable
-        ) +
-        labs(x = pc_a, y = pc_b)
-    }
-  )
-}
-
-get_loadings_plot(pca_loadings, "PC1", "PC2")
-```
-
-```{r}
-pca_loadings %>%
-  melt(variable.name = "component") %>% 
-  ggplot(aes(x = component, y = variable, fill = abs(value))) +
-    geom_tile(color = "white") +
-    scale_fill_gradient2(
-        low = "white", high = "green", mid = "white",
-        midpoint = 0.2, limit = c(0, 1), space = "Lab",
-        name = "Loading Value"
-    ) +
-    theme_minimal() +
-    coord_fixed()
-```
-
-## Data Wrangling: 1 row per game
-
-## Visualization
-
-### Variable Correlation
-
-Next, we look at a correlation heat map with all variables.  There are too many variables to get a clear sense of what's going on, so we'll break it down in the next couple visualizations.
-```{r}
-cor_mat <- cor(dataset)
-melted_cormat <- melt(cor_mat, na.rm = TRUE) 
-upper_tri <- melted_cormat %>%
-  mutate(Var1 = as.character(Var1), Var2 = as.character(Var2)) %>%
-  filter(Var1 < Var2) %>%
-  mutate(Var1 = as.factor(Var1), Var2 = as.factor(Var2))
-# Heatmap
-ggplot(data = upper_tri, aes(Var2, Var1, fill = value)) +
-  geom_tile(color = "white")+
-  scale_fill_gradient2(
-    low = "blue", high = "red", mid = "white", 
-    midpoint = 0, limit = c(-1,1), space = "Lab", 
-    name="Pearson\nCorrelation"
-  ) +
-  theme_minimal()+ 
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
-  coord_fixed() 
-```
-
-We consider which variables are highly correlated (cor > 0.5).  We see that `TotalGold` and `TotalExperience` are the variables with the most highly correlated pairs.  This makes sense because they are high-level metrics that are likely influenced by lower level metrics such as `AvgLevel` and `GoldDiff`.
-```{r}
-upper_tri %>%
-  filter(abs(value) > 0.5) %>%
-  ggplot(aes(Var2, Var1, fill = value)) +
-  geom_tile(color = "white")+
-  scale_fill_gradient2(
-    low = "blue", high = "red", mid = "white", 
-    midpoint = 0, limit = c(-1,1), space = "Lab", 
-    name="Pearson\nCorrelation"
-  ) +
-  theme_minimal()+ 
-  theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
-  coord_fixed() 
-```
-
-Next, we look to see if any variables are 100\% correlated.  We find that `GoldPerMin` is 100\% correlated with `TotalGold` and `CSPerMin` with `TotalMinionsKilled`.  As such we will drop `TotalGold` and `TotalMinionsKilled` when we prepare for modeling.
-```{r}
-filter(upper_tri, value == 1)
-```
-
-### KPI Performance of Winning vs. Losing Team
-
-Our first in-depth look will be the correlation of each variable with Wins.  We find that gold-related KPIs `GoldDiff`, `ExperienceDiff`, `TotalGold`, and `GoldPerMin` top the list.  Experience KPIs `TotalExperience` and `AvgLevel` are slightly less correlated, as are player vs. player aggression KPIs `Kills`, `Deaths`, and `Assists`. Monster, Minion, and Ward KPIs are the least correlated.  It will be interesting to see if our Primary Component Analysis pulls these groups out.
-```{r}
-as_tibble(cor_mat) %>%
-  mutate(comparedVar = rownames(cor_mat)) %>%
-  select(comparedVar, blueWins) %>%
-  arrange(desc(abs(blueWins)))
-``` 
-
-Taking a look at the distributions of the top 5 variables that are most correlated with `Wins`, we see that each distribution is approximately normal.  Additionally, the distribution for the variable when `Wins` is 0 is generally shifted to the left from when `Wins` is 1.  This is in line with out expectations - it makes sense that the losing team should have less Gold and Experience than the winning team.
-```{r}
-top_5_most_correlated <- c("percdiffGoldPerMin", "percdiffTotalGold", "percdiffTotalExperience", "percdiffKills", "percdiffDeaths")
-
-compare_histogram <- function(df, kpi_name) {
-  
-  wrapr::let(
-    alias = list(KPI_VAR = kpi_name),
-    expr = {
-      ggplot(df, aes(x = KPI_VAR, color = factor(blueWins))) +
-        geom_histogram(position = "identity", alpha = 0.5, fill = "white") +
-        theme_bw()
-    }
-  )
-
-}
-
-plots <- lapply(top_5_most_correlated, compare_histogram, df = dataset) 
-wrap_plots(plots)
-```
-
-### PCA
-
-```{r}
-pca_results <- prcomp(~ . - gameId - blueWins, data = dataset, center = TRUE, scale = TRUE)
-
-# scree plot
-var_proportion <- pca_results %>%
-  summary() %>%
-  `[[`("importance") %>%
-  t() %>%
-  as.data.frame() %>%
-  mutate(component_number = str_replace(rownames(.), "PC", "")) %>%
-  mutate(component_number = as.numeric(component_number)) %>%
-  rename_all(~tolower(str_replace_all(., "\\s+", "_"))) 
-
-scree_plot <- ggplot(var_proportion, aes(x = component_number, y = proportion_of_variance)) +
-  geom_col() 
-
-cum_prop_plot <- ggplot(var_proportion, aes(x = component_number, y = cumulative_proportion)) +
-  geom_line() +
-  geom_point() +
-  geom_hline(yintercept = 0.9)
-
-scree_plot + cum_prop_plot
-```
-
-
-```{r}
-pca_loadings <- data.frame(variable = rownames(pca_results$rotation), pca_results$rotation)
-
-get_loadings_plot <- function(loadings_df, pc_a, pc_b) {
-  wrapr::let(
-    alias = list(PCOMP_A = pc_a, PCOMP_B = pc_b),
-    expr = {
-      ggplot(loadings_df) +
-        geom_segment(
-          aes(x = 0, y = 0, xend = PCOMP_A, yend = PCOMP_B), 
-          arrow = arrow(length = unit(1/2, "picas")),
-          color = "black"
-        ) +
-        annotate(
-          "text", 
-          x = loadings_df$PCOMP_A*1.2, y = loadings_df$PCOMP_B*1.2,
-          label = loadings_df$variable
-        ) +
-        labs(x = pc_a, y = pc_b)
-    }
-  )
-}
-
-get_loadings_plot(pca_loadings, "PC1", "PC2")
-```
-
-```{r}
-pca_loadings %>%
-  melt(variable.name = "component") %>% 
-  ggplot(aes(x = component, y = variable, fill = abs(value))) +
-    geom_tile(color = "white") +
-    scale_fill_gradient2(
-        low = "white", high = "green", mid = "white",
-        midpoint = 0.2, limit = c(0, 1), space = "Lab",
-        name = "Loading Value"
-    ) +
-    theme_minimal() +
-    coord_fixed()
-```
-
 
 ## Model fitting
+
+We'll compare 3 classification models - decision trees, support vector machines, and xgboost - using `mlr3`.  We'll also test the performance improvements granted by applying PCA to the blue and red teams' data. `mlr3pipelines` provide a concise way to tune parameters across these models, including whether or not PCA is used as a preprocessing step.  A short introduction to pipelines is included in the "mlr3 Walkthrough" section below.
+
+### mlr3 Walkthrough: Decision Tree
+
+To determine a baseline for model performance, we first estimate the classification accuracy for a decision tree by using cross validation.  This also gives us the opportunity to walk through the ml3 modeling process in detail.  In mlr3 applying cross-validation requires three objects - (1) a `learner` containing the model to be trained; (2) a `task` containing the data to be resampled from; (3) a `resampling` that defines the sampling method.  
 
 ```{r}
 # mlr3 classification task needs target to be a factor
 dataset <- mutate(dataset, blueWins = as.factor(blueWins))
 
+set.seed(1)
 train <- sample_frac(dataset, 0.9)
 test <- anti_join(dataset, train)
 ```
-
-### mlr3 Walkthrough: Decision Tree
-
-To determine a baseline for model performance, we first estimate the classification accuracy for a decision tree by using cross validation.  This also gives us the opportunity to walk through the ml3 modeling process in detail.  In mlr3 applying cross-validation requires three objects - (1) a `learner` containing the model to be trained; (2) a `task` containing the data to be resampled from; (3) a `resampling` that defines the sampling method.  
 
 #### Task
 
@@ -600,7 +287,7 @@ task$select(cols = setdiff(task$feature_names, c("blueTotalGold", "blueTotalMini
 
 #### Resampling
 
-See the different resampling implementations:
+See the different resampling implementations available to choose from:
 ```{r}
 as.data.table(mlr_resamplings)  %>%
   unnest_wider(params, names_sep = "")
@@ -692,9 +379,12 @@ my_resample$aggregate(msrs(c("classif.acc", "classif.recall")))
 
 ### mlr3
 
-The plan for this model is to apply PCA to the red and blue columns separately, join the results, and fit a model.  We'll try multiple different models including classification decision tree, random forest, support vector machine, and xgboost.  To accomplish this, we'll use mlr3pipelines.  A custom function will be needed to rejoin the split PCA results since there is not an operator for renaming variables within a pipeline.  [This section](https://mlr3book.mlr-org.com/extending-pipeops.html) of the mlr3 book provides examples of customer operators.
+The plan for this model is to apply PCA to the red and blue columns separately, join the results, and fit a model.  We'll try multiple different models including classification decision tree, support vector machine, and xgboost.  This [discussion](https://github.com/mlr-org/mlr3book/issues/116) in the mlr3 GitHub repo served as a great resource for creating the pipeline below.
+
+Note: A custom function will be needed to rejoin the split PCA results since there is not an operator for renaming variables within a pipeline.  [This section](https://mlr3book.mlr-org.com/extending-pipeops.html) of the mlr3 book provides examples of customer operators.
 
 #### Test/Train Split
+
 We set up two different tasks for training and testing, deselecting linearly dependent columns:
 ```{r}
 taskTrain = TaskClassif$new("train", backend = train, target = "blueWins", positive = "1")
@@ -708,6 +398,7 @@ taskTrain$select(cols = setdiff(taskTest$feature_names, c("blueTotalGold", "blue
 
 #### Custom Operator
 
+A custom operator is created for renaming PCA results so that two different PCA routines can be joined.
 ```{r}
 PipeOpPrepend = R6::R6Class("PipeOpPrepend",
   inherit = mlr3pipelines::PipeOpTaskPreprocSimple,
@@ -730,8 +421,9 @@ PipeOpPrepend = R6::R6Class("PipeOpPrepend",
 )
 ```
 
-#### Define Graph
+#### Feature Engineering graph
 
+Here's where the magic starts to happen.  mlr3 pipelines can be expressed as graphs of PipeOperators.  In the code below, we create two sequences of PipeOperators.  The first sequence is for applying PCA to the blue team's columns; the second sequence is for applying PCA to the red team's columns.  Finally, the features that are created by these two sequences are unioned together by the graph union operator `gunion`.
 ```{r}
 pca_blue <- po("select", id = "blue_cols", param_vals = list(selector = selector_grep("blue"))) %>>%
   po("pca", id = "blue_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
@@ -749,221 +441,130 @@ graph$keep_results <- TRUE
 graph$plot(html = TRUE)
 ```
 
-#### Performance Baseline
+#### Add Models to Feature Graph
 
+Similar to the parallel sequences of operators created above for the blue and red team PCAs, we create parallel operators for 3 different models.  Since we are not stacking the resulting models, only one model will be fit in each run of the pipeline.  This is different than the parallel PCA sequences which will be fit each time.  This is why the `branch` and `unbranch` PipeOperators appear before and after the learners and why they didn't appear around the PCAs.  A hyperparameter is used to choose which "branch" to follow for a given training of the graph.
 ```{r}
-cart_graph <- graph %>>%
-  PipeOpLearner$new(lrn("classif.rpart", predict_type = "response"))
+cart_lrn <- mlr_pipeops$get("learner", learner = mlr_learners$get("classif.rpart"), id = "rf_lrn")
+svm_lrn <- mlr_pipeops$get("learner", learner = mlr_learners$get("classif.svm"), id = "svm_lrn")
+xgb_lrn <- mlr_pipeops$get("learner", learner = mlr_learners$get("classif.xgboost"), id = "xgb_lrn")
 
-cart_learner = GraphLearner$new(cart_graph)
+model_ids <- c("rf_lrn", "svm_lrn", "xgb_lrn")
+models <- gunion(list(rf_lrn, svm_lrn, xgb_lrn))
 
-cv5 = rsmp("cv", folds = 5)
-result <- resample(taskTrain, cart_learner, cv5)
+many_graph <- graph %>>%
+  mlr_pipeops$get("branch", options = model_ids, id = "models_branch") %>>%
+  models %>>%
+  mlr_pipeops$get("unbranch", options = model_ids, id = "models_unbranch")
 
-result$aggregate(msrs(c("classif.acc", "classif.recall", "classif.sensitivity")))
+many_graph$plot(html = TRUE)
 ```
 
-#### No Tuning
-
+This is a more concise way to represent the code above:
 ```{r}
-rf_lrn <- mlr_pipeops$get("learner", learner = mlr_learners$get("classif.ranger"))
-rf_lrn <- PipeOpLearner$new(lrn("classif.ranger"))
-rf_lrn <- po("learner", lrn("classif.ranger"))
+rf_lrn <- po("learner", lrn("classif.ranger"), id = "rf_lrn")
+svm_lrn <- po("learner", lrn("classif.svm"), id = "svm_lrn")
+xgb_lrn <- po("learner", lrn("classif.xgboost"), id = "xgb_lrn")
 
-svm_lrn <- po("learner", lrn("classif.svm"))
-xgb_lrn <- po("learner", lrn("classif.xgboost"))
+model_ids <- c("rf_lrn", "svm_lrn", "xgb_lrn")
+models <- gunion(list(rf_lrn, svm_lrn, xgb_lrn))
 
 models <- gunion(list(rf_lrn, svm_lrn, xgb_lrn))
 
 many_graph <- graph %>>%
+  po("branch", options = model_ids, id = "model_branch") %>>%
   models %>>%
-  PipeOpUnbranch$new(c("rf_lrn", "svm_lrn", "xgb_lrn"), id = "model_branch")
+  po("unbranch", options = model_ids, id = "model_unbranch")
 
 many_graph$plot(html = TRUE)
 ```
+
+#### Fit Graph for Each Model Branch
 
 ```{r}
 many_learner = GraphLearner$new(many_graph)
 
 many_learner$predict_type <- "prob"
 
-result <- resample(taskTrain, many_learner, cv5)
-
 ps <- ParamSet$new(list(
-  ParamFct$new("model_branch.selection", levels = lrn_names)
+  ParamFct$new("model_branch.selection", levels = model_ids)
 ))
+
+num_models <- length(model_ids)
+
+many_instance = TuningInstance$new(
+  task = taskTrain,
+  learner = many_learner,
+  resampling = cv5,
+  measures = msr("classif.acc"),
+  param_set = ps,
+  terminator = term("evals", n_evals = num_models)
+)
+
+# Verbose:
+# tuner <- TunerGridSearch$new()
+# tuner$param_set$values <- list(batch_size = num_models, 
+#                                resolution = num_models, 
+#                                param_resolutions = list(model_branch.selection = num_models))
+
+tuner <- tnr(
+  "grid_search", 
+  batch_size = num_models, 
+  resolution = num_models, 
+  param_resolutions = list(model_branch.selection = num_models)
+)
+
+future::plan("multiprocess")
+
+tuner$tune(many_instance)
+
+many_instance$archive(unnest = "params")[, c("model_branch.selection", "classif.acc")]
 ```
 
+#### Hyperparameter Search over Graph
+
+We'll tune the number of PCA components to keep using `red/blue_pca.rank.`.
+```{r}
+many_learner$param_set
+```
 
 ```{r}
-library(mlr3tuning)
-
 tune_ps = ParamSet$new(list(
-  ParamInt$new("blue_pca.rank.", lower = 1, upper = 7),
-  ParamInt$new("red_pca.rank.", lower = 1, upper = 7),
-  ParamDbl$new("classif.rpart.cp", lower = 0.001, upper = 0.1),
-  ParamInt$new("classif.rpart.minbucket", lower = 5, upper = 40)
+  ParamInt$new("blue_pca.rank.", lower = 1, upper = 7)
+  ,ParamInt$new("red_pca.rank.", lower = 1, upper = 7)
+  ,ParamFct$new("model_branch.selection", levels = c("svm_lrn", "xgb_lrn")) 
+  ,ParamFct$new("svm_lrn.type", levels = "C-classification")
+  ,ParamDbl$new("svm_lrn.cost", lower = 0.001, upper = 1)
+  ,ParamDbl$new("xgb_lrn.eta", lower = 0.01, upper = 0.2)
+  ,ParamInt$new("xgb_lrn.max_depth", lower = 3, upper = 10)
 ))
 
-tune_ps = ParamSet$new(list(
-  ParamDbl$new("classif.rpart.cp", lower = 0.001, upper = 0.1)
-))
+tune_ps$add_dep("svm_lrn.type",
+                "model_branch.selection", CondEqual$new("svm_lrn"))
+tune_ps$add_dep("svm_lrn.cost",
+                "model_branch.selection", CondEqual$new("svm_lrn"))
+tune_ps$add_dep("xgb_lrn.eta",
+                "model_branch.selection", CondEqual$new("xgb_lrn"))
+tune_ps$add_dep("xgb_lrn.max_depth",
+                "model_branch.selection", CondEqual$new("xgb_lrn"))
 
-term_spec = term("evals", n_evals = 20)
+term_spec = term("model_time", secs = 600)  # 10 minutes
+tuner = tnr("random_search")
 
 instance = TuningInstance$new(
   task = taskTrain,
-  learner = graph_learner,
+  learner = many_learner,
   resampling = cv5,
   measures = msr("classif.acc"),
   param_set = tune_ps,
   terminator = term_spec
 )
 
-instance
+tuner$tune(instance)
+
+instance$archive(unnest = "tune_x") %>%
+  select(classif.acc, blue_pca.rank., red_pca.rank., model_branch.selection, 
+         svm_lrn.cost, xgb_lrn.eta, xgb_lrn.max_depth) %>%
+  arrange(desc(classif.acc))
 ```
-
-
-```{r}
-tuner = tnr("grid_search", resolution = 10)
-tuner = tnr("random_search")
-
-result = tuner$tune(instance)
-
-tbl <- instance$archive(unnest = "params")[, c("blue_pca.rank.", "red_pca.rank.", 
-                                        "classif.rpart.cp", "classif.rpart.minbucket",
-                                        "classif.acc")]
-```
-
-
-```{r}
-library(mlr3)
-library(mlr3pipelines)
-library(paradox)
-library(dplyr)
-
-PipeOpPrepend = R6::R6Class("PipeOpPrepend",
-  inherit = mlr3pipelines::PipeOpTaskPreprocSimple,
-  public = list(
-    initialize = function(id = "prepend", param_vals = list()) {
-      ps = ParamSet$new(params = list(ParamUty$new("prefix", default = "", tags = "prefix")))
-      super$initialize(id, param_set = ps, param_vals = param_vals)
-    },
-    
-    get_state = function(task) {
-      old_names = task$feature_names
-      new_names = paste0(self$param_set$get_values(tags = "prefix"), old_names)
-      list(old_names = old_names, new_names = new_names)
-    },
-
-    transform = function(task) {
-      task$rename(self$state$old_names, self$state$new_names)
-    }
-  )
-)
-
-toy_df <- data.frame(
-    homeWins = c(1, 0, 1, 0),
-    homeHits = c(13,10,12,11),
-    homeHomeRuns = c(0,2,0,0),
-    awayHits = c(10,11,14,8),
-    awayHomeRuns = c(1,0,1,1)
-) %>%
-  mutate(homeWins = as.factor(homeWins))
-
-task = TaskClassif$new("toy_task", backend = toy_df, target = "homeWins", positive = "1")
-
-pca_home = po("select", id = "home_cols", param_vals = list(selector = selector_grep("home"))) %>>%
-  po("pca", id = "home_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
-  PipeOpPrepend$new(id = "home_rename", param_vals = list(prefix = "home_"))
-
-pca_away = po("select", id = "away_cols", param_vals = list(selector = selector_grep("away"))) %>>%
-  po("pca", id = "away_pca", param_vals = list(center = TRUE, scale. = TRUE)) %>>%
-  PipeOpPrepend$new(id = "away_rename", param_vals = list(prefix = "away_"))
-
-graph <- gunion(list(pca_home, pca_away)) %>>%
-  po("featureunion", id = "all_together") 
-
-graph$train(task)
-```
-
-
-```{r}
-PipeOpPrepend = R6::R6Class("PipeOpPrepend",
-  inherit = mlr3pipelines::PipeOpTaskPreproc,
-  public = list(
-    initialize = function(id = "prepend", param_vals = list()) {
-      ps = ParamSet$new(params = list(ParamUty$new("prefix", default = "", tags = "prefix")))
-      super$initialize(id, param_set = ps, param_vals = param_vals)
-    },
-
-    train_task = function(task) {
-      self$state = list()
-      task$rename(task$feature_names, paste0(self$param_set$get_values(tags = "prefix"), task$feature_names))
-    },
-
-    predict_task = function(task) {
-      task$rename(task$feature_names, paste0(self$param_set$get_values(tags = "prefix"), task$feature_names))
-    }
-  )
-)
-```
-```{r}
-# Sepal.Length = 35; Sepal.Width = 23; Petal.Length = 43; Petal.Width = 22
-# 42L results in 44 bins
-
-task = mlr_tasks$get("iris")
-# 42 breaks --> 44 groups; each field has <= 43 distinct values
-op = PipeOpHistBin$new(param_vals = list(breaks = 42L))
-expect_pipeop(op)
-result = op$train(list(task))
-expect_task(result[[1L]])
-
-d = apply(result[[1L]]$data(cols = result[[1L]]$feature_names), MARGIN = 2L,
-          function(x) expect_lt(length(unique(x)), 44L))
-
-op2 = PipeOpHistBin$new(param_vals = list(breaks = 7L))
-result2 = op2$train(list(task))
-
-e = mapply(function(x, y) expect_lte(length(unique(x)), length(unique(y))),
-           x = result2[[1L]]$data(cols = result2[[1L]]$feature_names),
-           y = result[[1L]]$data(cols = result[[1L]]$feature_names))
-
-```
-bins = sapply(result[[1L]]$data(), FUN = levels)[2:5]
-```{r}
-test_that("PipeOpHistBin - not all bins present", {
-  task1 = mlr_tasks$get("iris")
-  dat = iris
-  dat$Sepal.Width[[1L]] = 2.13
-  task2 = TaskClassif$new("iris2", backend = dat, target = "Species")
-  
-  op = PipeOpHistBin$new(param_vals = list(breaks = seq(0, 10, by = 0.05)))
-  expect_pipeop(op)
-  
-  # task1 does not have a Sepal.Width value within the interval (2.10, 2.15]
-  bin_to_check = cut(c(2.10, 2.2), 2)[1] # (2.10, 2.15]
-  
-  result1 = op$train(list(task1))
-  expect_false(bin_to_check %in% result1[[1L]]$data()$Sepal.Width)
-  
-  result2 = op$predict(list(task2))
-  expect_true(bin_to_check %in% result2[[1L]]$data()$Sepal.Width)
-  
-  result3 = op$train(list(task2))
-  expect_equal(result2[[1L]]$data(), result3[[1L]]$data())
-})
-```
-
-
-
-
-
-
-
-
-
-
-
-
 
