@@ -28,4 +28,6 @@ After working on multiple big data projects at work, I decided I wanted to branc
 
 In this notebook, Spark ML and Spark Pipelines are used to train a Naive Bayes model for predicting the answer status of a StackOverflow question.  The input data is from a Kaggle Competition: https://www.kaggle.com/c/predict-closed-questions-on-stack-overflow.  
 
-I was surprised to find that instructions for AWS services were sparse and fragmented. Rather than repeat those instructions here, I've written a [blog post](https://zackbarry.github.io/blog/2020/aws-startup/) to pair existing documentation with additional instructions where that documentation is sparse or confusing. The post starts with creating an AWS account and ends with using EMR Spark notebooks to analyze data stored in S3 buckets. Where appropriate, I’ve linked out to existing documentation rather than rewriting those details in this post.
+I was surprised to find that instructions for AWS services were sparse and fragmented. Rather than repeat those instructions here, I've written a blog post to pair existing documentation with additional instructions where that documentation is sparse or confusing. The post starts with creating an AWS account and ends with using EMR Spark notebooks to analyze data stored in S3 buckets. Where appropriate, I’ve linked out to existing documentation rather than rewriting those details in this post.
+
+[Link to blog post with AWS guide](https://zackbarry.github.io/blog/2020/aws-startup/)
