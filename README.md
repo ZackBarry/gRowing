@@ -2,7 +2,7 @@
 
 Repository for practicing modeling and cloud computing services.
 
-* [airbnb_nyc](https://github.com/ZackBarry/gRowing/tree/update-descriptions/airbnb_nyc)
+### [airbnb_nyc](https://github.com/ZackBarry/gRowing/tree/update-descriptions/airbnb_nyc)
 
 My goal with this EDA and model fitting exercise was to practice working with tree-based methods. I thought I'd do some basic EDA, apply some grid searches to XGBoost parameters, and select a final model. The process turned out to be a little more involved than that, and I'm glad it did! My continuous response variable y was log-normal and I chose to transform it so that the models were predicting log(y+1). Because of the transformation, the cross-validation mean squared error value provided by the modeling package (H2O) was the MSE of the log results. However, I wanted to use the CV MSE of y itself. Since H2O's R package doesn't allow for custom error functions, I had to work with the CV datasets directly to get the desired metric.
 
@@ -12,7 +12,7 @@ Two of the four most important predictors turned out to be whether the room was 
 
 [Link to blog post with published markdown](https://zackbarry.github.io/blog/2020/airbnb-new-york-city-kaggle/)
 
-* [graduate_admissions](https://github.com/ZackBarry/gRowing/tree/update-descriptions/graduate_admissions)
+### [graduate_admissions](https://github.com/ZackBarry/gRowing/tree/update-descriptions/graduate_admissions)
 
 My primary goal with this EDA and model fitting exercise was to practice working with dimensionality redacted techniques, specifically Primary Component Analysis. For the dataset I worked with, interpretability of results was a high priority. Thus, I had to make a judgement call as to whether or not the performance improvement of using PCA was worth the reduction in interpretability.
 
@@ -22,7 +22,7 @@ The final multiple linear regression model performed quite well with 0.05 MSE, 7
 
 [Link to blog post with published markdown](https://zackbarry.github.io/blog/2020/graduate-admissions-kaggle/)
 
-* [stackoverflow_closed](https://github.com/ZackBarry/gRowing/tree/master/stackoverflow_closed)
+### [stackoverflow_closed](https://github.com/ZackBarry/gRowing/tree/master/stackoverflow_closed)
 
 After working on multiple big data projects at work, I decided I wanted to branch out and learn some new skills on my own. Since all I own is my college laptop from 2013, I knew I had to build my own cluster or use a cloud computing platform. I chose to go with Amazon Web Services (AWS).
 
