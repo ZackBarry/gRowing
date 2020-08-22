@@ -1,6 +1,6 @@
 # gRowing
 
-Repository for practicing modeling and cloud computing services.
+Repository for practicing EDA, modeling, and cloud computing services.
 
 ### [airbnb_nyc](https://github.com/ZackBarry/gRowing/tree/update-descriptions/airbnb_nyc)
 
