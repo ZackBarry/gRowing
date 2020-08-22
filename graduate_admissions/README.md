@@ -1,0 +1,7 @@
+My primary goal with this EDA and model fitting exercise was to practice working with dimensionality redacted techniques, specifically Primary Component Analysis. For the dataset I worked with, interpretability of results was a high priority. Thus, I had to make a judgement call as to whether or not the performance improvement of using PCA was worth the reduction in interpretability.
+
+A secondary goal of this document was to practice building recipes for pre-modeling data preparation. In combination with caret, recipes provide an easy way to re-apply data prep stages at each fold in a cross-validation routine. This is important for a method like PCA where the components may be constructed differently for each fold.
+
+The final multiple linear regression model performed quite well with 0.05 MSE, 79% R^2, and apprixately i.i.d. normal residuals. Also, each predictor was statistically significant at an 0.05 alpha level. The most important predictor turned out to be CGPA followed by Letter of Rec, GRE Score, Research, and TOEFL Score. Students should be advised to focus on their coursework above all else. The should, however, attempt to receive a strong letter of recommendation and do well on standardized tests. It was suprising to see that University Ranking and Statement of Purpose were eliminated as part of RFE – people would probably tend to place University Ranking as one of the most important factors.
+
+[Link to blog post with published markdown](https://zackbarry.github.io/blog/2020/graduate-admissions-kaggle/)

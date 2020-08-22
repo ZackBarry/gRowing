@@ -1,13 +1,5 @@
-# Sign up for AWS
+After working on multiple big data projects at work, I decided I wanted to branch out and learn some new skills on my own. Since all I own is my college laptop from 2013, I knew I had to build my own cluster or use a cloud computing platform. I chose to go with Amazon Web Services (AWS).
 
+In this notebook, Spark ML and Spark Pipelines are used to train a Naive Bayes model for predicting the answer status of a StackOverflow question.  The input data is from a Kaggle Competition: https://www.kaggle.com/c/predict-closed-questions-on-stack-overflow.  
 
-# Load Kaggle data into S3 Bucket
-1. Create S3 bucket in desired region.
-2. Follow instructions from [here](https://confusedcoders.com/data-engineering/how-to-copy-kaggle-data-to-amazon-s3)
-	a. Make sure you save your kaggle API token as `kaggle.json` and not something silly like `kaggle-api-token.json` (the API request will specifically look for `~/.kaggle/kaggle.json`)
-	b. If you get a response of `403 - Forbidden` when trying to run `kaggle competitions download -c predict-closed-questions-on-stack-overflow`, make sure you've accepted the terms of the competition.  I was able to trigger the terms page by clicking the "Download All" button next to the API request on the Data tab of the competition page. ([link to github issue with solution](https://github.com/Kaggle/kaggle-api/issues/160#issuecomment-470207569))
-3. 
-4. 
-[https://confusedcoders.com/data-engineering/how-to-copy-kaggle-data-to-amazon-s3](https://confusedcoders.com/data-engineering/how-to-copy-kaggle-data-to-amazon-s3)
-
-If you wanted to load a CSV or other file directly from a url, this SO answer provides a method that requires only a free-tier EC2 instance: [link](https://datascience.stackexchange.com/a/5641).
+I was surprised to find that instructions for AWS services were sparse and fragmented. Rather than repeat those instructions here, I've written a [blog post](https://zackbarry.github.io/blog/2020/aws-startup/) to pair existing documentation with additional instructions where that documentation is sparse or confusing. The post starts with creating an AWS account and ends with using EMR Spark notebooks to analyze data stored in S3 buckets. Where appropriate, I’ve linked out to existing documentation rather than rewriting those details in this post.
