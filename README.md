@@ -23,6 +23,14 @@ I was surprised to find that instructions for AWS services were sparse and fragm
 
 [Link to blog post with AWS guide](https://zackbarry.github.io/blog/2020/aws-startup/)
 
+### [league_of_legends_classification](https://github.com/ZackBarry/gRowing/tree/master/league_of_legends_classification)
+
+mlr3 is a wonderful object-oriented machine learning package for R; I wanted to write a notebook that included a high level tutorial for mlr3 pipelines.  Section 3.1 contains a walkthrough of how to train a decision tree using mlr3 pipelines. I cover defining "tasks" for train and test, resampling methods for cross-validation, a "learner" for decision tree, and how to combine them all together.  This provides a foundation for the mlr3 Graph Learner I apply in Section 3.2 to run a hyperparameter grid search over several models.
+
+Principal Component Analysis was applied to each teams’ metrics in turn in order to obtain an uncorrelated set of predictors. 7 components were sufficient to explain > 80% of the variance in the data. We pitted Support Vector Machine, Random Forest, and XGBoost against one another using mlr3 Pipelines and found that Support Vector Machine with cost parameter 0.00888, 3 blue team components, and 4 blue team components provided the highest precision on the training set at 73.82%. The test precision using this model was 70.15%. Using such a small cost parameter guards against overfitting; this is shown by the test error being only 5% lower than the cross-validated training error.
+
+[Link to blog post with published markdown](https://zackbarry.github.io/blog/2020/applied-mlr3-pipelines/)
+
 ### [airbnb_nyc](https://github.com/ZackBarry/gRowing/tree/update-descriptions/airbnb_nyc)
 
 My goal with this EDA and model fitting exercise was to practice working with tree-based methods. I thought I'd do some basic EDA, apply some grid searches to XGBoost parameters, and select a final model. The process turned out to be a little more involved than that, and I'm glad it did! My continuous response variable y was log-normal and I chose to transform it so that the models were predicting log(y+1). Because of the transformation, the cross-validation mean squared error value provided by the modeling package (H2O) was the MSE of the log results. However, I wanted to use the CV MSE of y itself. Since H2O's R package doesn't allow for custom error functions, I had to work with the CV datasets directly to get the desired metric.
@@ -33,17 +41,9 @@ Two of the four most important predictors turned out to be whether the room was 
 
 [Link to blog post with published markdown](https://zackbarry.github.io/blog/2020/airbnb-price-prediction/)
 
-### [league_of_legends_classification](https://github.com/ZackBarry/gRowing/tree/master/league_of_legends_classification)
-
-mlr3 is a wonderful object-oriented machine learning package for R; I wanted to write a notebook that included a high level tutorial for mlr3 pipelines.  Section 3.1 contains a walkthrough of how to train a decision tree using mlr3 pipelines. I cover defining "tasks" for train and test, resampling methods for cross-validation, a "learner" for decision tree, and how to combine them all together.  This provides a foundation for the mlr3 Graph Learner I apply in Section 3.2 to run a hyperparameter grid search over several models.
-
-Principal Component Analysis was applied to each teams’ metrics in turn in order to obtain an uncorrelated set of predictors. 7 components were sufficient to explain > 80% of the variance in the data. We pitted Support Vector Machine, Random Forest, and XGBoost against one another using mlr3 Pipelines and found that Support Vector Machine with cost parameter 0.00888, 3 blue team components, and 4 blue team components provided the highest precision on the training set at 73.82%. The test precision using this model was 70.15%. Using such a small cost parameter guards against overfitting; this is shown by the test error being only 5% lower than the cross-validated training error.
-
-[Link to blog post with published markdown](https://zackbarry.github.io/blog/2020/applied-mlr3-pipelines/)
-
 ### [graduate_admissions](https://github.com/ZackBarry/gRowing/tree/update-descriptions/graduate_admissions)
 
-My primary goal with this EDA and model fitting exercise was to practice working with dimensionality redacted techniques, specifically Primary Component Analysis. For the dataset I worked with, interpretability of results was a high priority. Thus, I had to make a judgement call as to whether or not the performance improvement of using PCA was worth the reduction in interpretability.
+My primary goal with this EDA and model fitting exercise was to practice working with dimensionality reduction techniques, specifically Primary Component Analysis. For the dataset I worked with, interpretability of results was a high priority. Thus, I had to make a judgement call as to whether or not the performance improvement of using PCA was worth the reduction in interpretability.
 
 A secondary goal of this document was to practice building recipes for pre-modeling data preparation. In combination with caret, recipes provide an easy way to re-apply data prep stages at each fold in a cross-validation routine. This is important for a method like PCA where the components may be constructed differently for each fold.
 
