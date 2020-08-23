@@ -15,6 +15,9 @@ output:
 
 ```{r setup, message = FALSE, warning = FALSE }
 knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+
 library(tidyverse)
 library(DataExplorer)
 library(ggpubr)
@@ -31,34 +34,39 @@ library(mlr3measures)
 library(mlr3tuning)
 library(mlr3pipelines)
 library(paradox) # ParamSet specifications for mlr3 tuning
+library(kableExtra)
+library(ddpcr)
+lgr::get_logger("mlr3")$set_threshold("warn") # supress verbose output
 
 dataset <- read_csv("Data/high_diamond_ranked_10min.csv")
 ```
 
 # Introduction
 
-Leage of Legends is one of the most popular online multiplier games.  Two teams of 5 players compete to battle their way to their oponents' base.  From game to game, players can assume different characters and roles on their team.
+Leage of Legends is one of the most popular online multiplier games.  Two teams of 5 players compete to battle their way to their oponents' base.  From game to game, players can assume different characters and roles on their team.  
 
-The goal of this notebook is to predict the outcome of a game with data from the first 10 minutes.  Typically, games last 35min-45min, so it will be interesting to see how telling the first 10 minutes are.  The dataset contains 19 different KPIs per team across 10,000 games.  
+The goal of this notebook is to predict the outcome of a game with data from the first 10 minutes.  Typically, games last 35min-45min, so it will be interesting to see how telling the first 10 minutes are.  The dataset contains 19 different KPIs per team across 10,000 games.  As e-sports betting is a growing industry, we will be using classification precision for model selection.  Precision measures the percent of positive predictions that were true positives.  By using precision as the target metric, we will pick the model that is most "confident" in predicting wins.  To predict losses, specificity could be used.
 
 # Pre-Modeling Stages
 
 ## Acquiring/Loading Data
 
 We can see that the same variables are available for each the "red" and "blue" team, except `blueWins` records the outcome (there is no `redWins`).
-```{r}
+```{r, echo = F}
 dataset %>% str()
 ```
 
 No columns have missing data.
-```{r}
-map_df(dataset, function(x) { sum(is.na(x)) }) 
+```{r, echo = F}
+map_df(dataset, function(x) { sum(is.na(x)) }) %>%
+  kable() %>%
+  kable_styling()
 ```
 
 ## Data Wrangling: 1 row per team
 
-We'd like to be able to see distributions of the winning teams' KPIs alongside the losing teams' KPIs.  Currently, the losing and winning team for each map occupy the same row.  Here we modify the data set so that each row is one team's performance in a given game:
-```{r}
+We'd like to be able to see distributions of the winning teams' KPIs alongside the losing teams' KPIs.  Currently, the losing and winning team for each map occupy the same row.  We modify the data set so that each row is one team's performance in a given game.
+```{r, echo = F}
 blue_df <- dataset %>%
   select_at(vars(-contains("red")))
 
@@ -72,18 +80,18 @@ colnames(red_df) <- str_replace(colnames(red_df), "red([a-zA-Z]*)", "\\1")
 long_df <- rbind(blue_df, red_df)
 ```
 
-There are no values that we need to impute in this dataset.
+Note that there are no values that we need to impute in this dataset.
 
 ## Visualization
 
 ### Variable Correlation
 
 Next, we look at a correlation heat map with all variables.  There are too many variables to get a clear sense of what's going on, so we'll break it down in the next couple visualizations.
-```{r}
+```{r, echo = F}
 cor_mat <- cor(long_df)
 # Melt the correlation matrix
 library(reshape2)
-melted_cormat <- melt(cor_mat, na.rm = TRUE) 
+melted_cormat <- melt(cor_mat, na.rm = TRUE)
 upper_tri <- melted_cormat %>%
   mutate(Var1 = as.character(Var1), Var2 = as.character(Var2)) %>%
   filter(Var1 < Var2) %>%
@@ -92,52 +100,58 @@ upper_tri <- melted_cormat %>%
 ggplot(data = upper_tri, aes(Var2, Var1, fill = value)) +
   geom_tile(color = "white")+
   scale_fill_gradient2(
-    low = "blue", high = "red", mid = "white", 
-    midpoint = 0, limit = c(-1,1), space = "Lab", 
+    low = "blue", high = "red", mid = "white",
+    midpoint = 0, limit = c(-1,1), space = "Lab",
     name="Pearson\nCorrelation"
   ) +
-  theme_minimal()+ 
+  theme_minimal()+
   theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
-  coord_fixed() 
+  coord_fixed()
 ```
 
 We consider which variables are highly correlated (cor > 0.5).  We see that `TotalGold` and `TotalExperience` are the variables with the most highly correlated pairs.  This makes sense because they are high-level metrics that are likely influenced by lower level metrics such as `AvgLevel` and `GoldDiff`.
-```{r}
+```{r, echo = F}
 upper_tri %>%
   filter(abs(value) > 0.5) %>%
   ggplot(aes(Var2, Var1, fill = value)) +
   geom_tile(color = "white")+
   scale_fill_gradient2(
-    low = "blue", high = "red", mid = "white", 
-    midpoint = 0, limit = c(-1,1), space = "Lab", 
+    low = "blue", high = "red", mid = "white",
+    midpoint = 0, limit = c(-1,1), space = "Lab",
     name="Pearson\nCorrelation"
   ) +
-  theme_minimal()+ 
+  theme_minimal()+
   theme(axis.text.x = element_text(angle = 45, vjust = 1, size = 9, hjust = 1)) +
-  coord_fixed() 
+  coord_fixed()
 ```
 
 Next, we look to see if any variables are 100\% correlated.  We find that `GoldPerMin` is 100\% correlated with `TotalGold` and `CSPerMin` with `TotalMinionsKilled`.  As such we will drop `TotalGold` and `TotalMinionsKilled` when we prepare for modeling.
-```{r}
-filter(upper_tri, value == 1)
+```{r, echo = F}
+filter(upper_tri, value == 1) %>%
+  rename(PearsonCorrelation = value) %>%
+  kable() %>%
+  kable_styling()
 ```
 
 ### KPI Performance of Winning vs. Losing Team
 
 Our first in-depth look will be the correlation of each variable with Wins.  We find that gold-related KPIs `GoldDiff`, `ExperienceDiff`, `TotalGold`, and `GoldPerMin` top the list.  Experience KPIs `TotalExperience` and `AvgLevel` are slightly less correlated, as are player vs. player aggression KPIs `Kills`, `Deaths`, and `Assists`. Monster, Minion, and Ward KPIs are the least correlated.  It will be interesting to see if our Primary Component Analysis pulls these groups out.
-```{r}
+```{r, echo = F}
 as_tibble(cor_mat) %>%
   mutate(comparedVar = rownames(cor_mat)) %>%
   select(comparedVar, Wins) %>%
-  arrange(desc(abs(Wins)))
-``` 
+  arrange(desc(abs(Wins))) %>%
+  rename(WinsCorrelation = Wins) %>%
+  kable() %>%
+  kable_styling()
+```
 
 Taking a look at the distributions of the top 5 variables that are most correlated with `Wins`, we see that each distribution is approximately normal.  Additionally, the distribution for the variable when `Wins` is 0 is generally shifted to the left from when `Wins` is 1.  This is in line with out expectations - it makes sense that the losing team should have less Gold and Experience than the winning team.
-```{r}
+```{r, echo = F}
 top_5_most_correlated <- c("GoldDiff", "ExperienceDiff", "TotalGold", "GoldPerMin", "TotalExperience")
 
 compare_histogram <- function(df, kpi_name) {
-  
+
   wrapr::let(
     alias = list(KPI_VAR = kpi_name),
     expr = {
@@ -149,38 +163,17 @@ compare_histogram <- function(df, kpi_name) {
 
 }
 
-plots <- lapply(top_5_most_correlated, compare_histogram, df = long_df) 
+plots <- lapply(top_5_most_correlated, compare_histogram, df = long_df)
 wrap_plots(plots)
 ```
 
-### VIF: Another Look at Correlation
-
-```{r}
-long_df <- select(long_df, -c(TotalGold, TotalMinionsKilled))
-
-vif_model <- lm(Wins ~ . - gameId, data = long_df)
-
-vif(vif_model)
-```
-
-```{r}
-alias(vif_model)
-```
-
-```{r}
-long_df <- select(long_df, -EliteMonsters)
-
-vif_model <- lm(Wins ~ . - gameId, data = long_df)
-
-vif(vif_model)
-```
 
 ### PCA
 
-Next we seek to reduce the dimension of our predictor space by applying Principal Component Analysis (PCA).  PCA uses linear combinations of possibly correlated input variables to form a new set of variables (principal components) that are uncorrelated with one another.  Additionally, the variables are created sequentially to explain the most variance possible in the dataset.  A variance threshold can be used for dimensionality reduction (e.g. keep only those components that explain more than 5\% of the variance). Note: we center and scale (standardize) the data before applying PCA since variables with larger mean or standard deviation will be prioritized to explain the variation of the data.  
+Next we seek to reduce the dimension of our predictor space by applying Principal Component Analysis (PCA).  PCA uses linear combinations of possibly correlated input variables to form a new set of variables (principal components) that are uncorrelated with one another.  Additionally, the variables are created sequentially to explain the most variance possible in the dataset.  A variance threshold can be used for dimensionality reduction (e.g. keep only those components that explain more than 5\% of the variance). Note: we center and scale (standardize) the data before applying PCA since variables with larger mean or standard deviation will be prioritized to explain the variation of the data.
 
 In the scree plot below, the magnitude of the eigenvalue indicates the amount of variation that each principal component captures.  The proportion of variance for a given component is the component's eigenvalue divided by the sum of all eigenvalues.  We see that the first component  and second components explain ~35\%  and ~13\% of the variance respectively. Later components are similar in the amount of variance they explain.  The bottom plot shows the cumulative variance explained by the first N components.  One rule of thumb is to keep enough components so that this cumulative variance exceeds 80\%.  In this case, 7 variables appears to be sufficient.
-```{r}
+```{r, echo = F}
 pca_results <- prcomp(~ . - gameId - Wins, data = long_df, center = TRUE, scale = TRUE)
 
 # scree plot
@@ -195,7 +188,7 @@ var_proportion <- pca_results %>%
   mutate(eigenvalue = standard_deviation^2)
 
 scree_plot <- ggplot(var_proportion, aes(x = component_number, y = eigenvalue)) +
-  geom_col() 
+  geom_col()
 
 prop_plot <- ggplot(var_proportion, aes(x = component_number, y = proportion_of_variance)) +
   geom_col()
@@ -212,7 +205,7 @@ Next we consider a loading plot which shows how strongly each input variable inf
 In this example, the variables that contribute most to `PC1` are `GoldDiff`, `ExperienceDiff`, `AvgLevel` and `TotalExperience`. Not many variables contribute more to `PC2` than to `PC1`, but `Kills`, `Assists`, and `Deaths` contribute significantly.  `PC1` appears to represent high-level team characteristics, while `PC2` represents the biggest KPIs within a game.
 
 We see that `Kills` and `Assists` are strongly correlated with one another.  `Deaths` is negatively correlated with `AvgLevel` and `TotalExperience`.
-```{r}
+```{r, echo = F}
 pca_loadings <- data.frame(variable = rownames(pca_results$rotation), pca_results$rotation)
 
 get_loadings_plot <- function(loadings_df, pc_a, pc_b) {
@@ -221,12 +214,12 @@ get_loadings_plot <- function(loadings_df, pc_a, pc_b) {
     expr = {
       ggplot(loadings_df) +
         geom_segment(
-          aes(x = 0, y = 0, xend = PCOMP_A, yend = PCOMP_B), 
+          aes(x = 0, y = 0, xend = PCOMP_A, yend = PCOMP_B),
           arrow = arrow(length = unit(1/2, "picas")),
           color = "black"
         ) +
         annotate(
-          "text", 
+          "text",
           x = loadings_df$PCOMP_A*1.2, y = loadings_df$PCOMP_B*1.2,
           label = loadings_df$variable
         ) +
@@ -240,9 +233,9 @@ get_loadings_plot(pca_loadings, "PC1", "PC2")
 ```
 
 Finally, we visualize the contribution of each variable to each component with a heat map.  To make it easier to identify contributing variables, those with loading values less than 0.2 are colored as white.
-```{r}
+```{r, echo = F}
 pca_loadings %>%
-  melt(variable.name = "component") %>% 
+  melt(variable.name = "component") %>%
   ggplot(aes(x = component, y = variable, fill = abs(value))) +
     geom_tile(color = "white") +
     scale_fill_gradient2(
@@ -255,13 +248,13 @@ pca_loadings %>%
 ```
 
 
-## Model fitting
+# Model fitting
 
 We'll compare 3 classification models - decision trees, support vector machines, and xgboost - using `mlr3`.  We'll also test the performance improvements granted by applying PCA to the blue and red teams' data. `mlr3pipelines` provide a concise way to tune parameters across these models, including whether or not PCA is used as a preprocessing step.  A short introduction to pipelines is included in the "mlr3 Walkthrough" section below.
 
-### mlr3 Walkthrough: Decision Tree
+## mlr3 Walkthrough: Decision Tree
 
-To determine a baseline for model performance, we first estimate the classification accuracy for a decision tree by using cross validation.  This also gives us the opportunity to walk through the ml3 modeling process in detail.  In mlr3 applying cross-validation requires three objects - (1) a `learner` containing the model to be trained; (2) a `task` containing the data to be resampled from; (3) a `resampling` that defines the sampling method.  
+To determine a baseline for model performance, we first estimate the classification accuracy for a decision tree by using cross validation.  This also gives us the opportunity to walk through the ml3 modeling process in detail.  In mlr3 applying cross-validation requires three objects - (1) a `learner` containing the model to be trained; (2) a `task` containing the data to be resampled from; (3) a `resampling` that defines the sampling method.
 
 ```{r}
 # mlr3 classification task needs target to be a factor
@@ -272,7 +265,7 @@ train <- sample_frac(dataset, 0.9)
 test <- anti_join(dataset, train)
 ```
 
-#### Task
+### Task
 
 A Task wraps a DataBackend which provides a layer of abstraction for various data storage systems (e.g. DataFrames).  mlr3 comes with a data.table implementation for backends; the conversion from DataFrame to data.table is done automatically.  Instead of working directly with DataBackends, they are worked with indirectly through the Task they are associated with.  Tasks also store information about the role of individual columns of the DataBackend (e.g. target vs. feature).
 ```{r}
@@ -285,12 +278,12 @@ Deselect linearly dependent variables determined by EDA above - this is done in-
 task$select(cols = setdiff(task$feature_names, c("blueTotalGold", "blueTotalMinionsKilled", "redKills", "redTotalGold", "redTotalMinionsKilled")))
 ```
 
-#### Resampling
+### Resampling
 
 See the different resampling implementations available to choose from:
 ```{r}
 as.data.table(mlr_resamplings)  %>%
-  unnest_wider(params, names_sep = "")
+  unnest_wider(params, names_sep = "") 
 ```
 
 The verbose way to do this is to retrieve the specific Resampling object, set the hyperparameters, and attach it to a task in 3 separate steps:
@@ -306,19 +299,16 @@ my_cv <- rsmp("cv", folds = 5)$instantiate(task)
 my_cv
 ```
 
-#### Learner
+### Learner
 
 See the different built-in learners:
 ```{r}
 as.data.table(mlr_learners)  %>%
-  filter(str_detect(key, "classif"))
-```
-
-Attach additional learners with `mlr3learners` package:
-```{r}
-library(mlr3learners)
-as.data.table(mlr_learners)  %>%
-  filter(str_detect(key, "classif"))
+  filter(str_detect(key, "classif")) %>%
+  as.data.frame() %>%
+  select(key, predict_types) %>%
+  kable() %>%
+  kable_styling()
 ```
 
 As with resampling methods, there is a verbose way and a concise way to get a learner:
@@ -333,20 +323,24 @@ my_learner = lrn("classif.rpart")
 my_learner
 ```
 
-#### Apply Cross Validation
+### Apply Cross Validation
 
 A call to `resample` returnes a `ResampleResult` object that can be used to access different models and metrics from the CV runs.
-```{r}
+```{r, warning=F, message=F}
 my_resample <- resample(task = task, learner = my_learner, resampling = my_cv, store_models = TRUE)
 my_resample
 ```
 
-#### Retrieve Performance Metrics
+### Retrieve Performance Metrics
 
 We can aggregate model-specific metrics user `Measure` objects. Here is a list of different built-in measures:
 ```{r}
 as.data.table(mlr_measures) %>%
-  filter(task_type == "classif")
+  filter(task_type == "classif") %>%
+  as.data.frame() %>%
+  select(key, predict_type, task_properties) %>%
+  kable() %>%
+  kable_styling()
 ```
 
 To calculate a given measure for each CV model, we first create a measure:
@@ -374,16 +368,16 @@ my_resample$aggregate(msr("classif.acc"))
 
 And we can also pass multiple statistics:
 ```{r}
-my_resample$aggregate(msrs(c("classif.acc", "classif.recall")))
+my_resample$aggregate(msrs(c("classif.acc", "classif.precision")))
 ```
 
-### mlr3
+## mlr3: Graph Learner w/ Several Base Learners
 
 The plan for this model is to apply PCA to the red and blue columns separately, join the results, and fit a model.  We'll try multiple different models including classification decision tree, support vector machine, and xgboost.  This [discussion](https://github.com/mlr-org/mlr3book/issues/116) in the mlr3 GitHub repo served as a great resource for creating the pipeline below.
 
 Note: A custom function will be needed to rejoin the split PCA results since there is not an operator for renaming variables within a pipeline.  [This section](https://mlr3book.mlr-org.com/extending-pipeops.html) of the mlr3 book provides examples of customer operators.
 
-#### Test/Train Split
+### Test/Train Split
 
 We set up two different tasks for training and testing, deselecting linearly dependent columns:
 ```{r}
@@ -393,10 +387,10 @@ taskTrain$select(cols = setdiff(taskTrain$feature_names, c("blueTotalGold", "blu
 
 taskTest = TaskClassif$new("test", backend = test, target = "blueWins", positive = "1")
 
-taskTrain$select(cols = setdiff(taskTest$feature_names, c("blueTotalGold", "blueTotalMinionsKilled", "redKills", "redTotalGold", "redTotalMinionsKilled")))
+taskTest$select(cols = setdiff(taskTest$feature_names, c("blueTotalGold", "blueTotalMinionsKilled", "redKills", "redTotalGold", "redTotalMinionsKilled")))
 ```
 
-#### Custom Operator
+### Custom Operator
 
 A custom operator is created for renaming PCA results so that two different PCA routines can be joined.
 ```{r}
@@ -407,7 +401,7 @@ PipeOpPrepend = R6::R6Class("PipeOpPrepend",
       ps = ParamSet$new(params = list(ParamUty$new("prefix", default = "", tags = "prefix")))
       super$initialize(id, param_set = ps, param_vals = param_vals)
     },
-    
+
     get_state = function(task) {
       old_names = task$feature_names
       new_names = paste0(self$param_set$get_values(tags = "prefix"), old_names)
@@ -421,7 +415,7 @@ PipeOpPrepend = R6::R6Class("PipeOpPrepend",
 )
 ```
 
-#### Feature Engineering graph
+### Feature Engineering graph
 
 Here's where the magic starts to happen.  mlr3 pipelines can be expressed as graphs of PipeOperators.  In the code below, we create two sequences of PipeOperators.  The first sequence is for applying PCA to the blue team's columns; the second sequence is for applying PCA to the red team's columns.  Finally, the features that are created by these two sequences are unioned together by the graph union operator `gunion`.
 ```{r}
@@ -441,11 +435,11 @@ graph$keep_results <- TRUE
 graph$plot(html = TRUE)
 ```
 
-#### Add Models to Feature Graph
+### Add Models to Feature Graph
 
 Similar to the parallel sequences of operators created above for the blue and red team PCAs, we create parallel operators for 3 different models.  Since we are not stacking the resulting models, only one model will be fit in each run of the pipeline.  This is different than the parallel PCA sequences which will be fit each time.  This is why the `branch` and `unbranch` PipeOperators appear before and after the learners and why they didn't appear around the PCAs.  A hyperparameter is used to choose which "branch" to follow for a given training of the graph.
 ```{r}
-cart_lrn <- mlr_pipeops$get("learner", learner = mlr_learners$get("classif.rpart"), id = "rf_lrn")
+rf_lrn <- mlr_pipeops$get("learner", learner = mlr_learners$get("classif.ranger"), id = "rf_lrn")
 svm_lrn <- mlr_pipeops$get("learner", learner = mlr_learners$get("classif.svm"), id = "svm_lrn")
 xgb_lrn <- mlr_pipeops$get("learner", learner = mlr_learners$get("classif.xgboost"), id = "xgb_lrn")
 
@@ -453,9 +447,9 @@ model_ids <- c("rf_lrn", "svm_lrn", "xgb_lrn")
 models <- gunion(list(rf_lrn, svm_lrn, xgb_lrn))
 
 many_graph <- graph %>>%
-  mlr_pipeops$get("branch", options = model_ids, id = "models_branch") %>>%
+  mlr_pipeops$get("branch", options = model_ids, id = "model_branch") %>>%
   models %>>%
-  mlr_pipeops$get("unbranch", options = model_ids, id = "models_unbranch")
+  mlr_pipeops$get("unbranch", options = model_ids, id = "model_unbranch")
 
 many_graph$plot(html = TRUE)
 ```
@@ -479,9 +473,10 @@ many_graph <- graph %>>%
 many_graph$plot(html = TRUE)
 ```
 
-#### Fit Graph for Each Model Branch
+### Fit Graph for Each Model Branch
 
-```{r}
+No we're ready to fit each model branch of the graph to get a baseline performance measure before hyperparameter tuning.  This is done by creating a hyperparameter set for which the only parameter is which branch to choose.  5-folds CV will be used to estimate the untuned accuracy and precision. We find that the Random Forest learner outperforms SVM and XGBoost with regard to both metrics.
+```{r, warning=F, message=F}
 many_learner = GraphLearner$new(many_graph)
 
 many_learner$predict_type <- "prob"
@@ -492,53 +487,55 @@ ps <- ParamSet$new(list(
 
 num_models <- length(model_ids)
 
+cv5 <- rsmp("cv", folds = 5)$instantiate(taskTrain)
+
 many_instance = TuningInstance$new(
   task = taskTrain,
   learner = many_learner,
   resampling = cv5,
-  measures = msr("classif.acc"),
+  measures = msrs(c("classif.acc", "classif.precision")),
   param_set = ps,
   terminator = term("evals", n_evals = num_models)
 )
 
 # Verbose:
 # tuner <- TunerGridSearch$new()
-# tuner$param_set$values <- list(batch_size = num_models, 
-#                                resolution = num_models, 
+# tuner$param_set$values <- list(batch_size = num_models,
+#                                resolution = num_models,
 #                                param_resolutions = list(model_branch.selection = num_models))
 
 tuner <- tnr(
-  "grid_search", 
-  batch_size = num_models, 
-  resolution = num_models, 
+  "grid_search",
+  batch_size = num_models,
+  resolution = num_models,
   param_resolutions = list(model_branch.selection = num_models)
 )
 
-future::plan("multiprocess")
+quiet(tuner$tune(many_instance))
 
-tuner$tune(many_instance)
-
-many_instance$archive(unnest = "params")[, c("model_branch.selection", "classif.acc")]
+many_instance$archive(unnest = "params")[, c("model_branch.selection", "classif.acc", "classif.precision")]
 ```
 
-#### Hyperparameter Search over Graph
+### Hyperparameter Search over Graph
 
-We'll tune the number of PCA components to keep using `red/blue_pca.rank.`.
-```{r}
-many_learner$param_set
-```
+For each model, we'll tune the number of PCA components to keep by searching over different values of `red_pca.rank` and `blue_pca.rank.`.  We'll also look for an optimal regularization term for the SVM by searching over `svm_lrn.cost`.  For XGBoost we'll search over the max depth of a tree, `xgb_lrn.max_depth` and the learning rate, `xgb_lrn.eta`. Finally, for Random Forest we'll tune the max depth, `rf_lrn.max_depth`, and the number of variables available for splitting at each node, `rf_lrn.mtry`.
 
 ```{r}
 tune_ps = ParamSet$new(list(
-  ParamInt$new("blue_pca.rank.", lower = 1, upper = 7)
-  ,ParamInt$new("red_pca.rank.", lower = 1, upper = 7)
-  ,ParamFct$new("model_branch.selection", levels = c("svm_lrn", "xgb_lrn")) 
+  ParamInt$new("blue_pca.rank.", lower = 2, upper = 7)
+  ,ParamInt$new("red_pca.rank.", lower = 2, upper = 7)
+  ,ParamFct$new("model_branch.selection", levels = c("svm_lrn", "xgb_lrn", "rf_lrn"))
   ,ParamFct$new("svm_lrn.type", levels = "C-classification")
   ,ParamDbl$new("svm_lrn.cost", lower = 0.001, upper = 1)
-  ,ParamDbl$new("xgb_lrn.eta", lower = 0.01, upper = 0.2)
+  ,ParamDbl$new("xgb_lrn.eta", lower = 0.01, upper = 0.4)
   ,ParamInt$new("xgb_lrn.max_depth", lower = 3, upper = 10)
+  ,ParamInt$new("rf_lrn.max.depth", lower = 3, upper = 10)
+  ,ParamInt$new("rf_lrn.mtry", lower = 2, upper = 4)
 ))
+```
 
+Since both models are included in the same graph learner, we need to make sure that the SVM parameters are applied when the SVM branch is selected and vice-versa for XGBoost and RandomForest.  This is done by adding dependencies to the parameters in the parameter set.
+```{r}
 tune_ps$add_dep("svm_lrn.type",
                 "model_branch.selection", CondEqual$new("svm_lrn"))
 tune_ps$add_dep("svm_lrn.cost",
@@ -547,24 +544,65 @@ tune_ps$add_dep("xgb_lrn.eta",
                 "model_branch.selection", CondEqual$new("xgb_lrn"))
 tune_ps$add_dep("xgb_lrn.max_depth",
                 "model_branch.selection", CondEqual$new("xgb_lrn"))
+tune_ps$add_dep("rf_lrn.max.depth",
+                "model_branch.selection", CondEqual$new("rf_lrn"))
+tune_ps$add_dep("rf_lrn.mtry",
+                "model_branch.selection", CondEqual$new("rf_lrn"))
+```
 
-term_spec = term("model_time", secs = 600)  # 10 minutes
+Finally, we run the grid search for 1 hour and report the results in order of decreasing precision.
+```{r}
+term_spec = term("model_time", secs = 3600)  # 1 hour
 tuner = tnr("random_search")
 
 instance = TuningInstance$new(
   task = taskTrain,
   learner = many_learner,
   resampling = cv5,
-  measures = msr("classif.acc"),
+  measures = msrs(c("classif.acc", "classif.precision")),
   param_set = tune_ps,
   terminator = term_spec
 )
 
-tuner$tune(instance)
+set.seed(42)
+
+quiet(tuner$tune(instance))
 
 instance$archive(unnest = "tune_x") %>%
-  select(classif.acc, blue_pca.rank., red_pca.rank., model_branch.selection, 
-         svm_lrn.cost, xgb_lrn.eta, xgb_lrn.max_depth) %>%
-  arrange(desc(classif.acc))
+  select(model_branch.selection, classif.acc, classif.precision,
+         blue_pca.rank., red_pca.rank.,
+         svm_lrn.cost, xgb_lrn.eta, xgb_lrn.max_depth,
+         rf_lrn.mtry, rf_lrn.max.depth) %>%
+  arrange(desc(classif.precision)) %>%
+  kable() %>%
+  kable_styling()
 ```
 
+The model with the highest precision was the Support Vector Machine at 73.82\%.  For this model, we had cost parameter equal to 0.00888, 3 blue team principal components, and 4 red team principal components.  The cost parameter C serves as a regularization parameter -- a small value for C increases the number of training errors while encouraging a smoother decision boundary.  The best performing Random Forest model scored 73.54\% precision; the best XGBoost model scored 72.55\%.
+
+#### Calculate Test Error
+
+We will now evaluate the test error for the top performing SVM model from our grid search above. We find that the test precision is 70.15\%.
+
+```{r}
+final_learner = many_learner
+
+final_learner$param_set$values$model_branch.selection <- 'svm_lrn'
+final_learner$param_set$values$blue_pca.rank. <- 3
+final_learner$param_set$values$red_pca.rank. <- 4
+final_learner$param_set$values$svm_lrn.type <- 'C-classification'
+final_learner$param_set$values$svm_lrn.cost <- 0.00888
+
+many_learner$train(taskTrain)
+
+prediction = many_learner$predict(taskTest)
+
+msrs = msrs(c('classif.acc', 'classif.precision'))
+
+prediction$score(msrs)
+```
+
+
+# Conclusion
+
+We set out to predict the winning League of Legends team based on 10 minutes of game play.  Principal Component Analysis was applied to each teams' metrics in turn in order to obtain an uncorrelated set of predictors.  7 components were sufficient to explain > 80\% of the variance in the data.  We pitted Support Vector Machine, Random Forest, and XGBoost against one another using mlr3 Pipelines and found that Support Vector Machine with cost parameter 0.00888, 3 blue team components, and 4 blue team components provided the highest precision on the training set at 73.82\%.  The test precision using this model was 70.15\%. Using such a small cost parameter guards against overfitting; this is shown by the test error being only 5\% lower than the cross-validated training error.
