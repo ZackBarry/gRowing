@@ -1,6 +1,17 @@
 # gRowing
 
-Repository for practicing EDA, modeling, and cloud computing services.
+Repository for practicing EDA, modeling, and cloud computing services. 
+
+Larger projects live in their own repositories:
+* [Spotify Playlist Recommender](https://github.com/ZackBarry/infinitePlaylists)
+* [Introduction to Statistical Learning Labs](https://github.com/ZackBarry/Introduction_to_Statistical_Learning)
+* [Lyrics Scraper and Analyzer](https://github.com/ZackBarry/LyricsScraper_Genius)
+* [Finite Difference Methods as a Scala package](https://github.com/ZackBarry/FiniteDifferences)
+* [Music Library via applied Data Structures](https://github.com/ZackBarry/MusicPlayer_Frontend)
+* [Minesweeper in C++](https://github.com/ZackBarry/Minesweeper_Cpp)
+* [Intro to Algorithms Implementations in C++](https://github.com/ZackBarry/Intro_to_Algorithms)
+
+Below is a summary of each of the smaller projects in this repository:
 
 ### [airbnb_nyc](https://github.com/ZackBarry/gRowing/tree/update-descriptions/airbnb_nyc)
 
