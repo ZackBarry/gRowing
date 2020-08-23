@@ -1,12 +1,23 @@
 # gRowing
 
-Repository for practicing EDA, modeling, and cloud computing services.
+Repository for practicing EDA, modeling, and cloud computing services. 
+
+Larger projects live in their own repositories:
+* [Spotify Playlist Recommender](https://github.com/ZackBarry/infinitePlaylists)
+* [Lyrics Scraper and Analyzer](https://github.com/ZackBarry/LyricsScraper_Genius)
+* [Finite Difference Methods as a Scala package](https://github.com/ZackBarry/FiniteDifferences)
+* [Introduction to Statistical Learning Labs](https://github.com/ZackBarry/Introduction_to_Statistical_Learning)
+* [Music Library via applied Data Structures](https://github.com/ZackBarry/MusicPlayer_Frontend)
+* [Minesweeper in C++](https://github.com/ZackBarry/Minesweeper_Cpp)
+* [Intro to Algorithms Implementations in C++](https://github.com/ZackBarry/Intro_to_Algorithms)
+
+Below is a summary of each of the smaller projects in this repository:
 
 ### [airbnb_nyc](https://github.com/ZackBarry/gRowing/tree/update-descriptions/airbnb_nyc)
 
 My goal with this EDA and model fitting exercise was to practice working with tree-based methods. I thought I'd do some basic EDA, apply some grid searches to XGBoost parameters, and select a final model. The process turned out to be a little more involved than that, and I'm glad it did! My continuous response variable y was log-normal and I chose to transform it so that the models were predicting log(y+1). Because of the transformation, the cross-validation mean squared error value provided by the modeling package (H2O) was the MSE of the log results. However, I wanted to use the CV MSE of y itself. Since H2O's R package doesn't allow for custom error functions, I had to work with the CV datasets directly to get the desired metric.
 
-We were able to use XGBoost to predict rental prices much more effectively than the baseline “naive” model. The baseline model had an MSE of 64000 (RSME of $252). Tuning the learning rate, depth, and L1 regularization parameters of the XGBoost model led to a final MSE value of 51500 (RMSE of $\227) and a final R^2 value of 0.2. These results are as good as we might have hoped, especially for a feature as important to the hospitality business as price. XGBoost is, however, one of the most popular non-parametric modeling frameworks so we trust that its results are at least similar to what other packages could provide. The “ideas for improvement” section below suggests some next steps one could take, using this document as a starting point.
+We were able to use XGBoost to predict rental prices much more effectively than the baseline “naive” model. The baseline model had an MSE of 64000 (RSME of $252). Tuning the learning rate, depth, and L1 regularization parameters of the XGBoost model led to a final MSE value of 51500 (RMSE of $227) and a final R^2 value of 0.2. These results are as good as we might have hoped, especially for a feature as important to the hospitality business as price. XGBoost is, however, one of the most popular non-parametric modeling frameworks so we trust that its results are at least similar to what other packages could provide. The “ideas for improvement” section below suggests some next steps one could take, using this document as a starting point.
 
 Two of the four most important predictors turned out to be whether the room was private or shared. Due to the one-hot encoding, implictly included is whether the room was the entire home or apartment. This makes sense because a shared room is likely to command a significantly lower price than a private room or an entire home/apartment. Longitude and latitude were also important; as we saw in the map in the exploratory analysis section there are regions of NY that are more expensive than others. This geospatial relationship is reflect in the combination of latitude and longitude.
 
